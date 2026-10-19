@@ -1,0 +1,95 @@
+{
+  "title": "指数君盯盘",
+  "theme": "dark",
+  "alpha": 0.7,
+  "topmost": true,
+  "trading_refresh": 5,
+  "idle_refresh": 60,
+  "width": 263,
+  "max_height": 460,
+  "groups": [
+    {
+      "name": "宽基指数",
+      "items": [
+        {
+          "code": "sh000001",
+          "alias": "上证指数"
+        },
+        {
+          "code": "sz399001",
+          "alias": "深证成指"
+        },
+        {
+          "code": "sz399006",
+          "alias": "创业板指"
+        },
+        {
+          "code": "sh000688",
+          "alias": "科创50"
+        },
+        {
+          "code": "hkHSTECH",
+          "alias": "恒生科技"
+        },
+        {
+          "code": "sh000300",
+          "alias": "沪深300"
+        },
+        {
+          "code": "sh000510",
+          "alias": "中证A500"
+        }
+      ]
+    },
+    {
+      "name": "自选",
+      "items": [
+        {
+          "code": "sz000995",
+          "alias": "皇台酒业"
+        },
+        {
+          "code": "sz002517",
+          "alias": "恺英网络"
+        },
+        {
+          "code": "sh601375",
+          "alias": "中原证券"
+        },
+        {
+          "code": "sh601336",
+          "alias": "新华保险"
+        },
+        {
+          "code": "sh601658",
+          "alias": "邮储银行"
+        },
+        {
+          "code": "sz159865",
+          "alias": "养殖ETF国泰"
+        },
+        {
+          "code": "sz159611",
+          "alias": "电力ETF广发"
+        },
+        {
+          "code": "sz159708",
+          "alias": "红利ETF西部利得"
+        },
+        {
+          "code": "sh510910",
+          "alias": "上证指数ETF南方"
+        },
+        {
+          "code": "sz300750",
+          "alias": "宁德时代"
+        },
+        {
+          "code": "sh515120",
+          "alias": "创新药ETF广发"
+        }
+      ]
+    }
+  ],
+  "height": 465
+}
