@@ -118,3 +118,20 @@ python ticker.pyw --selftest
 让出了一个圆角高度的条带（`vis_cc = vis_h - 圆角半径`），这几像素的可见内容略少，
 换来的是缩放后完全正常的绘制。
 
+## 开发流程（SDLC）
+
+项目内置了一套 SDLC 知识工程体系，后续新功能都按「需求 → 设计 → 编码 → 测试」四步走。
+
+```
+wiki/
+├── rules/      编码准则 / 文档规范 / 界面规范（改代码前必读）
+├── skills/     sdlc 路由 / prd / sdd / coding / test / ui-designer
+└── docs/       PRD、SDD、TC、SOP、经验库
+```
+
+- **入口规则**：`CLAUDE.md`（与 `AGENTS.md`、`wiki/Agentic.md` 内容一致）
+- **规范**：[编码准则](wiki/rules/coding-rules.md)（§5 是本项目专属约定：纯标准库、`px()` 换算、ctypes 类型声明、禁用 `SetWindowRgn`）
+- **界面**：[UI 规范](wiki/rules/ui-rules.md)（全部取值为项目真实 Token）
+
+每个环节完成后会停下来等确认，不会自动跳步；文档产出后需同步登记到 `wiki/wiki.md`。
+
