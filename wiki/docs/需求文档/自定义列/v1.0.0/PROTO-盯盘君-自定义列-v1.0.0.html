@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PROTO-盯盘君-自定义列-v1.0.0</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+文档信息
+  项目名称：盯盘君 MarketEye
+  文档版本：v1.0.0
+  版本状态：未发布
+  创建日期：2026-10-19
+  更新日期：2026-10-19
+  基于需求：PRD-盯盘君-自定义列-v1.0.0
+说明
+  本文件为界面视觉评审稿，仅用于确认列布局、列宽与降级表现，不参与产品构建。
+  最终实现以 ticker.pyw 的 Canvas 绘制为准；像素级对齐以实际程序截图为准。
+  页面内标的行情为示意数据，非实时行情。
+-->
+<style>
+  :root{
+    --bg:#151A24; --head:#1D2431; --line:#2A3345;
+    --text:#EAEFF8; --sub:#7E8BA1; --name:#C3CCDC;
+    --up:#FF4D4F; --down:#12B76A; --flat:#95A1B4; --bar:#9AA8C0;
+    --dash-bg:#1B2231; --dash-line:#2E3A50; --accent:#3B82F6; --danger:#E5484D;
+    --cn:"Microsoft YaHei UI","Microsoft YaHei","SimHei",sans-serif;
+    --num:Consolas,"Cascadia Mono","Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:32px 28px 60px;
+    background:#0B0E14;
+    background-image:radial-gradient(circle at 18% 12%,#182030 0%,#0B0E14 62%);
+    color:#C8D2E4;font-family:var(--cn);
+  }
+  .page-head{max-width:1400px;margin:0 auto 26px}
+  .page-head h1{font-size:19px;font-weight:700;color:#EAEFF8;margin:0 0 6px;letter-spacing:.2px}
+  .page-head p{margin:0 0 4px;font-size:12.5px;color:#8C9AB0;line-height:1.7}
+  .page-head .warn{color:#C9A34E}
+  .toolbar{max-width:1400px;margin:0 auto 22px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .btn{
+    font-family:var(--cn);font-size:12px;color:#EAEFF8;background:#232B3A;
+    border:1px solid #2E3A50;border-radius:8px;padding:7px 13px;cursor:pointer;
+  }
+  .btn:hover{background:#2B3446}
+  .btn.on{background:#2F6FED;border-color:#2F6FED}
+
+  .gallery{max-width:1400px;margin:0 auto;display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start}
+  .item{display:flex;flex-direction:column;gap:9px}
+  .caption{font-size:12px;color:#8C9AB0;line-height:1.55;max-width:520px}
+  .caption b{color:#D7E0EF;font-weight:600}
+  .caption .tag{
+    display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:4px;
+    background:#1D2431;border:1px solid #2A3345;color:#9AA8C0;margin-right:5px;
+  }
+
+  /* ---------- 窗口 ---------- */
+  .win{
+    position:relative;background:var(--bg);border-radius:16px;overflow:hidden;
+    box-shadow:0 18px 46px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.04);
+    display:flex;flex-direction:column;
+  }
+  .head{
+    height:34px;flex:0 0 34px;background:var(--head);
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 13px 0 14px;
+  }
+  .head .left{display:flex;align-items:center;gap:7px;min-width:0}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--down);flex:0 0 6px}
+  .dot.holiday{background:var(--flat)}
+  .dot.fail{background:var(--danger)}
+  .title{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap}
+  .clock{font-family:var(--num);font-size:12px;color:var(--sub);flex:0 0 auto}
+
+  .body{display:flex;flex:1 1 auto;min-height:0;overflow:hidden}
+
+  /* 固定表头：不参与滚动，列宽与数据列同一套 */
+  .hdrow{
+    flex:0 0 18px;height:18px;display:flex;align-items:center;gap:6px;
+    padding:0 8px 0 14px;margin-top:4px;min-width:0;
+    border-bottom:1px solid var(--line);
+  }
+  .hdrow.hide{display:none}
+  /* 有滚动条时：数据区宽 = 窗宽 − 10(条带)，且右内边距多 10，
+     表头右内边距需 8+10+10=28 才能与之逐列对齐 */
+  .hdrow.sbp{padding-right:28px}
+  /* 表头列宽沿用 w-price 等宽度类（这里不能再写 flex，否则覆盖掉列宽）；
+     文字统一右对齐到列右边界，与数值列数据右边缘成一条竖线 */
+  .hdrow .c{
+    text-align:right;font-family:var(--cn);font-size:10px;
+    color:var(--sub);
+  }
+  .hdrow .nm{flex:1 1 auto;min-width:0}
+  .hdrow .ind{
+    flex:0 0 52px;text-align:right;font-size:10px;color:var(--sub);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+
+  .rows{flex:1;padding:0 8px 0 14px;min-width:0;overflow:hidden}
+  .rows.scrollable{padding-right:18px}
+
+  .grp{
+    height:20px;display:flex;align-items:center;gap:8px;
+    font-size:10.5px;color:var(--sub);white-space:nowrap;
+  }
+  .grp .ln{flex:1;height:1px;background:var(--line)}
+
+  .row{height:25px;display:flex;align-items:center;font-size:12px;gap:6px}
+  /* 列宽由 w-* 类给固定值（这里只补 flex-shrink，不写 flex 简写覆盖列宽）；
+     数字右对齐到列右边界，小数点纵向成列 */
+  .row .c{flex-shrink:0;text-align:right;font-family:var(--num);font-weight:700;font-size:12px}
+  .row .nm{
+    flex:1 1 auto;min-width:0;color:var(--name);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .row .ind{
+    flex:0 0 52px;color:var(--sub);text-align:left;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .w-price{flex-basis:56px;width:56px}
+  .w-pct{flex-basis:54px;width:54px}
+  .w-vr{flex-basis:40px;width:40px}
+  .w-to{flex-basis:48px;width:48px}
+  .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--flat)}
+
+  /* 滚动条：条带 10，轨道 8，滑块胶囊 */
+  .sb{flex:0 0 10px;width:10px;position:relative;background:transparent}
+  .sb .track{position:absolute;left:1px;right:1px;top:0;bottom:0;background:var(--line)}
+  .sb .thumb{position:absolute;left:1px;right:1px;top:4%;height:86%;background:var(--bar);border-radius:4px}
+  .sb.hide{display:none}
+
+  /* 缩放热区示意 */
+  .hot{position:absolute;inset:0;pointer-events:none;display:none;border-radius:16px}
+  .hot span{position:absolute;background:rgba(59,130,246,.30)}
+  .hot .t{left:5px;right:5px;top:0;height:5px}
+  .hot .b{left:5px;right:5px;bottom:0;height:5px}
+  .hot .l{top:5px;bottom:5px;left:0;width:5px}
+  .hot .r{top:5px;bottom:5px;right:0;width:5px}
+  .hot .c1{left:0;top:0;width:5px;height:5px;background:rgba(59,130,246,.75)}
+  .hot .c2{right:0;top:0;width:5px;height:5px;background:rgba(59,130,246,.75)}
+  .hot .c3{left:0;bottom:0;width:5px;height:5px;background:rgba(59,130,246,.75)}
+  .hot .c4{right:0;bottom:0;width:5px;height:5px;background:rgba(59,130,246,.75)}
+  body.show-hot .hot{display:block}
+
+  /* ---------- 右键菜单 ---------- */
+  .menu{
+    position:absolute;background:#232B3A;border:1px solid #33405A;border-radius:7px;
+    padding:4px;box-shadow:0 14px 34px rgba(0,0,0,.6);min-width:186px;z-index:9;
+  }
+  .mi{
+    height:26px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 10px;font-size:12px;color:#EAEFF8;border-radius:5px;white-space:nowrap;
+  }
+  .mi.hover{background:#3B4A63}
+  .mi .arw{color:#9AA8C0;font-size:11px;margin-left:16px}
+  .mi .ck{color:#3B82F6;font-weight:700;width:14px;margin-right:6px}
+  .sep{height:1px;background:#33405A;margin:4px 6px}
+  .submenu{
+    position:absolute;left:100%;top:0;margin-left:2px;background:#232B3A;
+    border:1px solid #33405A;border-radius:7px;padding:4px;min-width:150px;
+    box-shadow:0 14px 34px rgba(0,0,0,.6);
+  }
+
+  /* ---------- 管理面板 ---------- */
+  .panel{
+    width:520px;height:600px;background:var(--dash-bg);border-radius:16px;
+    border:1px solid var(--dash-line);overflow:hidden;display:flex;flex-direction:column;
+    box-shadow:0 18px 46px rgba(0,0,0,.6);
+  }
+  .panel .ph{
+    height:52px;flex:0 0 52px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 16px;border-bottom:1px solid var(--dash-line);
+  }
+  .panel .ph .t{font-size:13px;font-weight:700;color:#EAEFF8}
+  .panel .ph .x{font-size:14px;color:#7E8BA1}
+  .tabs{display:flex;gap:2px;padding:10px 16px 0}
+  .tab{
+    font-size:12px;color:#8592A6;padding:7px 15px;border-radius:8px 8px 0 0;background:transparent;
+  }
+  .tab.on{background:#232B3A;color:#EAEFF8;box-shadow:inset 0 -2px 0 var(--accent)}
+  .panel-body{flex:1;padding:14px 16px;min-height:0;overflow:auto}
+  .hint{font-size:11px;color:#7E8BA1;line-height:1.7;margin:0 0 10px}
+
+  .colrow{
+    display:flex;align-items:center;gap:8px;height:38px;
+    border-bottom:1px solid #232B3A;padding:0 2px;
+  }
+  .colrow .idx{width:18px;color:#5E6B80;font-size:11px;font-family:var(--num)}
+  .colrow .nm{flex:1;font-size:12.5px;color:#EAEFF8}
+  .colrow .nm small{color:#7E8BA1;font-size:11px;margin-left:7px}
+  .ico{
+    width:26px;height:22px;border-radius:6px;border:1px solid #33405A;background:#263041;
+    color:#D7E0EF;font-size:11px;display:flex;align-items:center;justify-content:center;
+  }
+  .ico.off{opacity:.3}
+  .pin{font-size:10.5px;color:#5E6B80;margin-right:2px}
+  .pfoot{
+    flex:0 0 auto;padding:12px 16px 16px;border-top:1px solid var(--dash-line);
+    display:flex;justify-content:space-between;align-items:center;
+  }
+  .pfoot .note{font-size:11px;color:#7E8BA1}
+  .primary{
+    background:var(--accent);color:#fff;font-size:12px;border:none;border-radius:8px;padding:8px 16px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>盯盘君 · 自定义列 v1.0.0 · 视觉评审稿</h1>
+  <p>尺寸均为<b>逻辑像素</b>（与 <code>px()</code> 换算前的取值一致），配色与字号取自 <code>ui-rules.md</code>，未引入表外值。</p>
+  <p class="warn">页面内行情为示意数据，非实时。拖动缩放、颜色键透明圆角需实机验证，HTML 不复刻。</p>
+</div>
+
+<div class="toolbar">
+  <button class="btn on" id="hotBtn">显示缩放热区（5px）</button>
+  <span class="caption" style="max-width:none">六列全开最小宽度 <b>390</b>（PRD 预估 ≈380，此处为按字体实测算出的设计值）</span>
+</div>
+
+<div class="gallery">
+
+  <!-- ============ 1. 六列全开 ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">默认态</span><b>390 × 460</b> · 六列全开 · 内容超高出现滚动条<br>
+      顶部为<b>固定表头</b>（价格 / 涨跌幅 / 量比 / 换手 / 行业），不随内容滚动；名称列上方留空。
+      名称列吃掉剩余宽度；四个数值列右对齐，小数点纵向成列；行业列左对齐、用次要色。
+    </div>
+    <div class="win" style="width:390px;height:460px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君盯盘</span></div>
+        <div class="clock">15:36:08</div>
+      </div>
+      <div class="hdrow sbp">
+        <span class="nm"></span><span class="c w-price">价格</span><span class="c w-pct">涨跌幅</span><span class="c w-vr">量比</span><span class="c w-to">换手</span><span class="ind">行业</span>
+      </div>
+      <div class="body">
+        <div class="rows scrollable">
+          <div class="grp">宽基指数<span class="ln"></span></div>
+          <div class="row"><span class="nm">上证指数</span><span class="c w-price up">3730.92</span><span class="c w-pct up">+0.39%</span><span class="c w-vr up">0.88</span><span class="c w-to up">0.86%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">深证成指</span><span class="c w-price up">12180.45</span><span class="c w-pct up">+0.62%</span><span class="c w-vr up">0.95</span><span class="c w-to up">1.12%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">创业板指</span><span class="c w-price down">2586.31</span><span class="c w-pct down">-0.41%</span><span class="c w-vr down">0.91</span><span class="c w-to down">1.34%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">科创50</span><span class="c w-price up">1042.77</span><span class="c w-pct up">+1.08%</span><span class="c w-vr up">1.06</span><span class="c w-to up">0.97%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">恒生科技</span><span class="c w-price down">5820.14</span><span class="c w-pct down">-0.76%</span><span class="c w-vr flat">—</span><span class="c w-to flat">—</span><span class="ind">—</span></div>
+          <div class="grp">自选<span class="ln"></span></div>
+          <div class="row"><span class="nm">贵州茅台</span><span class="c w-price down">1324.97</span><span class="c w-pct down">-0.30%</span><span class="c w-vr down">1.12</span><span class="c w-to down">0.32%</span><span class="ind">白酒Ⅱ</span></div>
+          <div class="row"><span class="nm">宁德时代</span><span class="c w-price down">267.02</span><span class="c w-pct down">-3.60%</span><span class="c w-vr down">0.83</span><span class="c w-to down">0.73%</span><span class="ind">电池</span></div>
+          <div class="row"><span class="nm">皇台酒业</span><span class="c w-price up">12.86</span><span class="c w-pct up">+2.15%</span><span class="c w-vr up">1.84</span><span class="c w-to up">4.21%</span><span class="ind">白酒Ⅱ</span></div>
+          <div class="row"><span class="nm">恺英网络</span><span class="c w-price up">18.42</span><span class="c w-pct up">+1.76%</span><span class="c w-vr up">1.32</span><span class="c w-to up">3.05%</span><span class="ind">游戏Ⅱ</span></div>
+          <div class="row"><span class="nm">邮储银行</span><span class="c w-price flat">5.42</span><span class="c w-pct flat">0.00%</span><span class="c w-vr flat">0.72</span><span class="c w-to flat">0.31%</span><span class="ind">国有大型银行Ⅱ</span></div>
+          <div class="grp">ETF<span class="ln"></span></div>
+          <div class="row"><span class="nm">养殖ETF国泰</span><span class="c w-price up">0.812</span><span class="c w-pct up">+0.37%</span><span class="c w-vr up">0.94</span><span class="c w-to up">2.16%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">电力ETF广发</span><span class="c w-price down">1.246</span><span class="c w-pct down">-0.24%</span><span class="c w-vr down">0.88</span><span class="c w-to down">1.73%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">红利ETF西部利得</span><span class="c w-price up">1.058</span><span class="c w-pct up">+0.19%</span><span class="c w-vr up">0.81</span><span class="c w-to up">0.94%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">上证指数ETF南方</span><span class="c w-price up">1.132</span><span class="c w-pct up">+0.41%</span><span class="c w-vr up">0.90</span><span class="c w-to up">1.08%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">创新药ETF广发</span><span class="c w-price up">0.874</span><span class="c w-pct up">+1.53%</span><span class="c w-vr up">1.27</span><span class="c w-to up">2.86%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">停牌标的（示意）</span><span class="c w-price flat">--</span><span class="c w-pct flat">--</span><span class="c w-vr flat">--</span><span class="c w-to flat">--</span><span class="ind flat">—</span></div>
+        </div>
+        <div class="sb"><div class="track"></div><div class="thumb"></div></div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ 2. 拉宽 ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">手动拉宽</span><b>520 × 460</b> · 多出的 130px <b>全部给名称列</b><br>
+      表头随列一起右移，列名与数据始终对齐；数值列宽度不变；名称几乎不会被截断。
+    </div>
+    <div class="win" style="width:520px;height:460px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君盯盘</span></div>
+        <div class="clock">15:36:08</div>
+      </div>
+      <div class="hdrow">
+        <span class="nm"></span><span class="c w-price">价格</span><span class="c w-pct">涨跌幅</span><span class="c w-vr">量比</span><span class="c w-to">换手</span><span class="ind">行业</span>
+      </div>
+      <div class="body">
+        <div class="rows">
+          <div class="grp">宽基指数<span class="ln"></span></div>
+          <div class="row"><span class="nm">上证指数</span><span class="c w-price up">3730.92</span><span class="c w-pct up">+0.39%</span><span class="c w-vr up">0.88</span><span class="c w-to up">0.86%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">深证成指</span><span class="c w-price up">12180.45</span><span class="c w-pct up">+0.62%</span><span class="c w-vr up">0.95</span><span class="c w-to up">1.12%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">创业板指</span><span class="c w-price down">2586.31</span><span class="c w-pct down">-0.41%</span><span class="c w-vr down">0.91</span><span class="c w-to down">1.34%</span><span class="ind">—</span></div>
+          <div class="grp">自选<span class="ln"></span></div>
+          <div class="row"><span class="nm">贵州茅台</span><span class="c w-price down">1324.97</span><span class="c w-pct down">-0.30%</span><span class="c w-vr down">1.12</span><span class="c w-to down">0.32%</span><span class="ind">白酒Ⅱ</span></div>
+          <div class="row"><span class="nm">宁德时代</span><span class="c w-price down">267.02</span><span class="c w-pct down">-3.60%</span><span class="c w-vr down">0.83</span><span class="c w-to down">0.73%</span><span class="ind">电池</span></div>
+          <div class="row"><span class="nm">邮储银行</span><span class="c w-price flat">5.42</span><span class="c w-pct flat">0.00%</span><span class="c w-vr flat">0.72</span><span class="c w-to flat">0.31%</span><span class="ind">国有大型银行Ⅱ</span></div>
+          <div class="row"><span class="nm">养殖ETF国泰</span><span class="c w-price up">0.812</span><span class="c w-pct up">+0.37%</span><span class="c w-vr up">0.94</span><span class="c w-to up">2.16%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">电力ETF广发</span><span class="c w-price down">1.246</span><span class="c w-pct down">-0.24%</span><span class="c w-vr down">0.88</span><span class="c w-to down">1.73%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">红利ETF西部利得</span><span class="c w-price up">1.058</span><span class="c w-pct up">+0.19%</span><span class="c w-vr up">0.81</span><span class="c w-to up">0.94%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">创新药ETF广发</span><span class="c w-price up">0.874</span><span class="c w-pct up">+1.53%</span><span class="c w-vr up">1.27</span><span class="c w-to up">2.86%</span><span class="ind">—</span></div>
+        </div>
+        <div class="sb hide"></div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ 3. 降级 ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">降级展示</span><b>263 × 262</b> · 只放得下 3 列<br>
+      按固定优先级依次隐藏：<b>所属行业 → 换手率 → 量比 → 涨跌幅 → 价格</b>。名称列永不隐藏，也不留空白槽位。
+      <b>降级时表头整行隐藏</b>，避免顶部残留残缺列名。
+    </div>
+    <div class="win" style="width:263px;height:262px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君盯盘</span></div>
+        <div class="clock">15:36:08</div>
+      </div>
+      <div class="hdrow hide"></div>
+      <div class="body">
+        <div class="rows">
+          <div class="grp">宽基指数<span class="ln"></span></div>
+          <div class="row"><span class="nm">上证指数</span><span class="c w-price up">3730.92</span><span class="c w-pct up">+0.39%</span></div>
+          <div class="row"><span class="nm">深证成指</span><span class="c w-price up">12180.45</span><span class="c w-pct up">+0.62%</span></div>
+          <div class="row"><span class="nm">创业板指</span><span class="c w-price down">2586.31</span><span class="c w-pct down">-0.41%</span></div>
+          <div class="grp">自选<span class="ln"></span></div>
+          <div class="row"><span class="nm">贵州茅台</span><span class="c w-price down">1324.97</span><span class="c w-pct down">-0.30%</span></div>
+          <div class="row"><span class="nm">宁德时代</span><span class="c w-price down">267.02</span><span class="c w-pct down">-3.60%</span></div>
+          <div class="row"><span class="nm">皇台酒业</span><span class="c w-price up">12.86</span><span class="c w-pct up">+2.15%</span></div>
+        </div>
+        <div class="sb hide"></div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+
+    <div class="caption" style="margin-top:14px">
+      <span class="tag">硬下限</span><b>190 × 240</b> · 再窄也停在这里（MIN_W）<br>
+      只剩名称 + 价格，表头同样隐藏；这是拖动钳制的下限，不是「启用列所需宽度」。
+    </div>
+    <div class="win" style="width:190px;height:170px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君</span></div>
+        <div class="clock">15:36</div>
+      </div>
+      <div class="hdrow hide"></div>
+      <div class="body">
+        <div class="rows">
+          <div class="row"><span class="nm">上证指数</span><span class="c w-price up">3730.92</span></div>
+          <div class="row"><span class="nm">深证成指</span><span class="c w-price up">12180.45</span></div>
+          <div class="row"><span class="nm">创业板指</span><span class="c w-price down">2586.31</span></div>
+          <div class="row"><span class="nm">贵州茅台</span><span class="c w-price down">1324.97</span></div>
+          <div class="row"><span class="nm">宁德时代</span><span class="c w-price down">267.02</span></div>
+        </div>
+        <div class="sb hide"></div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ 4. 右键菜单 ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">入口 1</span>右键菜单 → <b>显示列 ▸</b><br>
+      5 个复选项，勾选即时生效；名称列不可关闭，因此不出现在子菜单里。
+    </div>
+    <div class="win" style="width:390px;height:300px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君盯盘</span></div>
+        <div class="clock">15:36:08</div>
+      </div>
+      <div class="hdrow">
+        <span class="nm"></span><span class="c w-price">价格</span><span class="c w-pct">涨跌幅</span><span class="c w-vr">量比</span><span class="c w-to">换手</span><span class="ind">行业</span>
+      </div>
+      <div class="body">
+        <div class="rows">
+          <div class="row"><span class="nm">上证指数</span><span class="c w-price up">3730.92</span><span class="c w-pct up">+0.39%</span><span class="c w-vr up">0.88</span><span class="c w-to up">0.86%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">贵州茅台</span><span class="c w-price down">1324.97</span><span class="c w-pct down">-0.30%</span><span class="c w-vr down">1.12</span><span class="c w-to down">0.32%</span><span class="ind">白酒Ⅱ</span></div>
+          <div class="row"><span class="nm">宁德时代</span><span class="c w-price down">267.02</span><span class="c w-pct down">-3.60%</span><span class="c w-vr down">0.83</span><span class="c w-to down">0.73%</span><span class="ind">电池</span></div>
+        </div>
+        <div class="sb hide"></div>
+      </div>
+
+      <div class="menu" style="left:22px;top:74px">
+        <div class="mi">管理自选</div>
+        <div class="mi">立即刷新</div>
+        <div class="sep"></div>
+        <div class="mi hover">显示列<span class="arw">▸</span>
+          <div class="submenu" style="top:-4px">
+            <div class="mi"><span><span class="ck">✓</span>价格</span></div>
+            <div class="mi"><span><span class="ck">✓</span>涨跌幅</span></div>
+            <div class="mi"><span><span class="ck">✓</span>量比</span></div>
+            <div class="mi"><span><span class="ck">✓</span>换手率</span></div>
+            <div class="mi hover"><span><span class="ck">✓</span>所属行业</span></div>
+          </div>
+        </div>
+        <div class="sep"></div>
+        <div class="mi">不透明度<span class="arw">▸</span></div>
+        <div class="mi">置顶<span class="arw">✓</span></div>
+        <div class="mi">恢复自适应高度</div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ 6. 滚动到底（表头不跟随） ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">滚动核对</span><b>390 × 460</b> · 内容已滚到底<br>
+      表头行与滚动条都在正文之外，<b>位置不随内容变化</b>；分组标签与数据应正常滚走，被表头与滚动条封面遮挡。
+    </div>
+    <div class="win" style="width:390px;height:460px">
+      <div class="head">
+        <div class="left"><span class="dot"></span><span class="title">指数君盯盘</span></div>
+        <div class="clock">15:36:08</div>
+      </div>
+      <div class="hdrow sbp">
+        <span class="nm"></span><span class="c w-price">价格</span><span class="c w-pct">涨跌幅</span><span class="c w-vr">量比</span><span class="c w-to">换手</span><span class="ind">行业</span>
+      </div>
+      <div class="body">
+        <div class="rows scrollable">
+          <div class="row"><span class="nm">创新药ETF广发</span><span class="c w-price up">0.874</span><span class="c w-pct up">+1.53%</span><span class="c w-vr up">1.27</span><span class="c w-to up">2.86%</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">停牌标的（示意）</span><span class="c w-price flat">--</span><span class="c w-pct flat">--</span><span class="c w-vr flat">--</span><span class="c w-to flat">--</span><span class="ind flat">—</span></div>
+          <div class="row"><span class="nm">恒生科技</span><span class="c w-price down">5820.14</span><span class="c w-pct down">-0.76%</span><span class="c w-vr flat">—</span><span class="c w-to flat">—</span><span class="ind">—</span></div>
+          <div class="row"><span class="nm">皇台酒业</span><span class="c w-price up">12.86</span><span class="c w-pct up">+2.15%</span><span class="c w-vr up">1.84</span><span class="c w-to up">4.21%</span><span class="ind">白酒Ⅱ</span></div>
+          <div class="row"><span class="nm">恺英网络</span><span class="c w-price up">18.42</span><span class="c w-pct up">+1.76%</span><span class="c w-vr up">1.32</span><span class="c w-to up">3.05%</span><span class="ind">游戏Ⅱ</span></div>
+          <div class="row"><span class="nm">邮储银行</span><span class="c w-price flat">5.42</span><span class="c w-pct flat">0.00%</span><span class="c w-vr flat">0.72</span><span class="c w-to flat">0.31%</span><span class="ind">国有大型银行Ⅱ</span></div>
+          <div class="row"><span class="nm">上证指数ETF南方</span><span class="c w-price up">1.132</span><span class="c w-pct up">+0.41%</span><span class="c w-vr up">0.90</span><span class="c w-to up">1.08%</span><span class="ind">—</span></div>
+        </div>
+        <div class="sb"><div class="track"></div><div class="thumb" style="top:auto;bottom:0"></div></div>
+      </div>
+      <div class="hot"><span class="t"></span><span class="b"></span><span class="l"></span><span class="r"></span><span class="c1"></span><span class="c2"></span><span class="c3"></span><span class="c4"></span></div>
+    </div>
+  </div>
+
+  <!-- ============ 5. 管理面板列页签 ============ -->
+  <div class="item">
+    <div class="caption">
+      <span class="tag">入口 2</span>管理自选 → <b>列</b> 页签<br>
+      只负责排序与恢复默认；开/关统一在右键菜单里做（避免两处都能关，出现「关了不知道在哪开」）。
+    </div>
+    <div class="panel">
+      <div class="ph">
+        <span class="t">管理自选</span>
+        <span class="x">✕</span>
+      </div>
+      <div class="tabs">
+        <div class="tab">标的</div>
+        <div class="tab on">列</div>
+      </div>
+      <div class="panel-body">
+        <p class="hint">调整列的显示顺序。「名称」固定在首位，不可移动；列的开与关请用右键菜单「显示列」。</p>
+
+        <div class="colrow">
+          <span class="idx">1</span>
+          <span class="nm">名称<small>固定首位</small></span>
+          <span class="pin">不可移动</span>
+        </div>
+        <div class="colrow">
+          <span class="idx">2</span>
+          <span class="nm">价格</span>
+          <span class="ico">↑</span><span class="ico">↓</span>
+        </div>
+        <div class="colrow">
+          <span class="idx">3</span>
+          <span class="nm">涨跌幅</span>
+          <span class="ico">↑</span><span class="ico">↓</span>
+        </div>
+        <div class="colrow">
+          <span class="idx">4</span>
+          <span class="nm">量比</span>
+          <span class="ico">↑</span><span class="ico">↓</span>
+        </div>
+        <div class="colrow">
+          <span class="idx">5</span>
+          <span class="nm">换手率</span>
+          <span class="ico">↑</span><span class="ico">↓</span>
+        </div>
+        <div class="colrow">
+          <span class="idx">6</span>
+          <span class="nm">所属行业<small>最先被降级隐藏</small></span>
+          <span class="ico">↑</span><span class="ico off">↓</span>
+        </div>
+      </div>
+      <div class="pfoot">
+        <span class="note">当前：6 列启用 · 与默认一致</span>
+        <button class="primary">恢复默认</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // 缩放热区显隐
+  var hotBtn = document.getElementById('hotBtn');
+  hotBtn.addEventListener('click', function(){
+    document.body.classList.toggle('show-hot');
+    hotBtn.classList.toggle('on');
+  });
+</script>
+</body>
+</html>

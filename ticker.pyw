@@ -73,6 +73,41 @@ KIND_CN = {
     "ETF": "ETF", "LOF": "LOF", "FUND": "基金", "QZ": "权证",
 }
 
+# ---------------------------------------------------------------- 列定义（自定义列）
+# 列键：顺序即默认显示顺序；name 固定首位且不可隐藏/移动。
+COL_KEYS = ["name", "price", "pct", "vr", "turnover", "industry"]
+
+# 列键 -> (菜单全称, 表头短式, 是否可隐藏, 列宽逻辑像素, 右对齐)
+# 列宽是"逻辑像素"，实测依据见 SDD §3.1.1；实际绘制由 px() 乘缩放比。
+COL_DEF = {
+    "name":     ("名称",     "",        False, 0,  False),
+    "price":    ("价格",     "价格",    True,  82, True),
+    "pct":      ("涨跌幅",   "涨跌幅",  True,  64, True),
+    "vr":       ("量比",     "量比",    True,  44, True),
+    "turnover": ("换手率",   "换手",    True,  52, True),
+    "industry": ("所属行业", "行业",    True,  56, True),
+}
+
+# 宽度不足时的隐藏顺序（先隐藏最不重要的）
+HIDE_ORDER = ["industry", "turnover", "vr", "pct", "price"]
+
+PAD_L = 14          # 内容区左内边距
+PAD_R = 8           # 内容区右内边距
+GAP = 6             # 列间距
+SB_W = 10           # 右侧滚动条条带宽度
+HDR_H = 18          # 固定表头条带高度
+HDR_FONT_SIZE = 8   # 表头字号
+NAME_MIN_W = 60     # 名称列最小宽度
+
+PLACEHOLDER_NA = "—"   # 字段有行情但该字段无数据
+PLACEHOLDER_NONE = "--"  # 整行无行情（停牌/未开盘/请求失败）
+
+# 行业数据
+IND_CACHE_FILE = os.path.join(BASE, "industry_cache.json")
+IND_TTL_DAYS = 7
+IND_BATCH = 80
+EAST_API = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+
 
 # ---------------------------------------------------------------- 基础工具
 def get_scale():
@@ -97,6 +132,21 @@ def save_json(path, obj):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+_LOG_ONCE = set()
+
+
+def log_once(msg):
+    """同类消息每进程最多写一条，避免轮询/重建把日志刷爆。"""
+    if msg in _LOG_ONCE:
+        return
+    _LOG_ONCE.add(msg)
+    try:
+        with open(os.path.join(BASE, "ticker.log"), "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%m-%d %H:%M:%S')} {msg}\n")
     except Exception:
         pass
 
@@ -176,6 +226,33 @@ def trunc(s, limit=13):
 
 
 # ---------------------------------------------------------------- 行情抓取
+def quote_kind(code):
+    """品种判定：决定 f[38]/f[49] 是否可信。
+
+    实测：沪深 A 股/ETF 88 字段、f[49] 是量比；港股只有 78 字段、
+    f[49] 是价位（hk00700 -> 411.000），绝不能当量比用；指数虽然有值
+    但语义无效。所以只看前缀，不看字段数。
+    """
+    c = code.lower()
+    if c.startswith("hk"):
+        return "hk"
+    body = c[2:]
+    if c.startswith("sh") and body.startswith("000"):
+        return "idx"
+    if c.startswith("sz") and body.startswith("399"):
+        return "idx"
+    return "stock"
+
+
+def _num(s):
+    """把报文字段转成正数 float；空串/非数字/负值一律 None。"""
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
 def fetch_quotes(codes):
     """一次请求拿回所有标的的实时行情。"""
     url = API + ",".join(codes)
@@ -200,6 +277,15 @@ def fetch_quotes(codes):
             price = float(f[3])
             if price <= 0:  # 停牌 / 未开盘
                 continue
+            kind = quote_kind(key)
+            turnover = vr = None
+            # 字段数 < 50 只作兜底（防止越界），品种判据始终是 quote_kind
+            # 北交所：腾讯把 f38/f49 恒填 "0.00"（实测 bj430047，不是空串），
+            # 无法区分"真的是 0"与"不提供"，只能整体视为无数据，否则会
+            # 全表北交所都显示 0.00 量比/换手，是误导性的确定值
+            if kind == "stock" and len(f) > 49 and not key.startswith("bj"):
+                turnover = _num(f[38])
+                vr = _num(f[49])
             out[key] = {
                 "code": key,
                 "name": f[1],
@@ -208,6 +294,8 @@ def fetch_quotes(codes):
                 "chg": float(f[31]),
                 "pct": float(f[32]),
                 "stamp": f[30],
+                "turnover": turnover,
+                "vr": vr,
             }
         except (ValueError, IndexError):
             continue
@@ -220,6 +308,103 @@ def stamp_hm(s):
         return f"{s[8:10]}:{s[10:12]}"
     m = re.search(r"(\d{1,2}:\d{2})", s)
     return m.group(1) if m else ""
+
+
+# ---------------------------------------------------------------- 行业（东方财富）
+def to_secid(code):
+    """腾讯代码 -> 东财 secid。返回 None 表示"不请求行业"。
+
+    北交所：东财市场号未经实测确认，若按 0 拼（与深市同号）则依赖
+    东财自己按代码段区分，无法验证。为免"看起来有行业、实际是别的票"
+    这类静默错值，本版一律不请求，行业列显示 —。
+    """
+    c = (code or "").strip().lower()
+    if c.startswith("bj"):
+        return None
+    if quote_kind(c) == "idx":
+        return None
+    body = c[2:]
+    if not body:
+        return None
+    if c.startswith("sh"):
+        if not body.isdigit() or len(body) != 6:
+            return None
+        return "1." + body
+    if c.startswith("sz"):
+        if not body.isdigit() or len(body) != 6:
+            return None
+        return "0." + body
+    if c.startswith("hk"):
+        if not body.isdigit():
+            return None
+        return "116." + body
+    return None
+
+
+def need_industry(code):
+    """是否需要为这个标的请求行业。"""
+    return to_secid(code) is not None
+
+
+def fetch_industries(codes):
+    """批量取行业名，返回 {code: name}；失败返回 None。
+
+    东财的 diff 顺序不保证与请求一一对应，所以不反查 f12/f13 拼回
+    代码，而是依赖「本批 secids 顺序 <-> diff 顺序」逐位映射；
+    长度不等就整批丢弃——宁可不显示行业，也不能串行。
+    单批异常不外抛：记一条日志、跳过该批，其余批次的行业照常返回。
+    """
+    codes = [c for c in codes if need_industry(c)]
+    if not codes:
+        return None
+    out, ok = {}, False
+    for i in range(0, len(codes), IND_BATCH):
+        batch = codes[i:i + IND_BATCH]
+        secids = ",".join(to_secid(c) for c in batch)
+        url = (f"{EAST_API}?fltt=2&fields=f12,f13,f14,f100&secids={secids}")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://quote.eastmoney.com/",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                obj = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            data = obj.get("data") or {}
+            diff = data.get("diff") or []
+            if obj.get("rc") != 0 or not diff or len(diff) != len(batch):
+                log_once("ind batch skip")
+                continue
+            for code, row in zip(batch, diff):
+                out[code] = (row.get("f100") or "").strip()
+            ok = True
+        except Exception as e:
+            log_once(f"ind fail {e!r}")
+            continue
+    return out if ok else None
+
+
+def load_industry_cache():
+    """读行业缓存；返回 {code: name} 或 None（无缓存/已过期/损坏）。"""
+    try:
+        with open(IND_CACHE_FILE, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        stamp = float(obj.get("stamp") or 0)
+        if time.time() - stamp > IND_TTL_DAYS * 86400:
+            return None
+        items = obj.get("items")
+        return items if isinstance(items, dict) else None
+    except Exception:
+        return None
+
+
+def save_industry_cache(items):
+    """写行业缓存。失败静默（只读目录/占用等），不影响运行。"""
+    try:
+        with open(IND_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"stamp": time.time(), "items": items}, f,
+                      ensure_ascii=False, indent=1)
+    except Exception:
+        pass
 
 
 def pad_to(s, width):
@@ -280,9 +465,26 @@ class Panel:
         self.data = {}
         self.err = None
         self.folded = False
-        self.rows = []      # [(code, name_id, price_id, pct_id)]
+        self.rows = []      # [(code, alias, {列键: item_id})]
         self.hit = []       # [(y0, y1, code)]
         self.dlg = None     # 自选管理面板
+
+        # 列状态：先加载配置，菜单才能取到正确的初始勾选态
+        self.col_order = list(COL_KEYS)
+        self.col_hidden = set()
+        self.load_columns()
+        self.vis_cols = [k for k in self.col_order]
+        self.col_x = {}
+        self.col_min_w = 0
+        self.need_hdr = True
+        self._widen_ok = True       # 启动首次 build 允许扩宽
+        self._ind_requested = False
+        self._ind_retry = False     # 重新勾选行业列后补发过一次
+
+        # 行业数据（只由 UI 线程 poll 写入）
+        self.ind = {}
+        self.ind_ready = False
+        self._logged = set()        # 日志去重
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -324,7 +526,182 @@ class Panel:
     def px(self, v):
         return int(round(v * self.s))
 
+    # ---------- 列配置（F-08） ----------
+    def _sanitize_cols(self, order, hidden):
+        """校验列顺序与隐藏集合：剔除未知键、去重、name 固定首位。"""
+        seen, clean = set(), []
+        for k in ("name",) + tuple(order or ()):
+            if k in COL_DEF and k not in seen:
+                seen.add(k)
+                clean.append(k)
+        for k in COL_KEYS:                     # 补齐配置里漏掉的列
+            if k not in seen:
+                seen.add(k)
+                clean.append(k)
+        hid = {k for k in (hidden or ()) if k in COL_DEF and COL_DEF[k][2]}
+        return clean, hid
+
+    def load_columns(self):
+        """读 columns.order / columns.hidden，非法项静默剔除并回写。"""
+        raw = self.cfg.get("columns") or {}
+        order, hidden = self._sanitize_cols(raw.get("order"), raw.get("hidden"))
+        need_write = (raw.get("order") != order) or \
+                     (sorted(raw.get("hidden") or []) != sorted(hidden))
+        self.col_order, self.col_hidden = order, hidden
+        if need_write:
+            self.cfg["columns"] = {"order": list(order), "hidden": sorted(hidden)}
+            save_json(CONFIG_FILE, self.cfg)
+            self._dbg("columns repaired")
+
+    def save_columns(self):
+        self.cfg["columns"] = {"order": list(self.col_order),
+                               "hidden": sorted(self.col_hidden)}
+        save_json(CONFIG_FILE, self.cfg)
+
+    def enabled_cols(self):
+        """启用列集合（按用户排好的顺序，已剔除关闭的列）。"""
+        return [k for k in self.col_order if k not in self.col_hidden]
+
+    def toggle_column(self, key):
+        """右键「显示列」勾选回调。
+
+        启用：允许扩宽（否则新列可能被挤没），行业列还需补发一次取数。
+        关闭：不改宽度——多余宽度自然还给名称列，反向扩宽没有意义。
+        """
+        if key not in COL_DEF or key == "name":
+            return
+        turn_on = key in self.col_hidden
+        if turn_on:
+            self.col_hidden.discard(key)
+            self._widen_ok = True
+        else:
+            self.col_hidden.add(key)
+        if key == "industry" and turn_on:
+            self._prepare_industry(retry=True)
+        self.save_columns()
+        self._refresh_col_menu()
+        self._rebuild()
+
+    def move_column(self, key, delta):
+        """列顺序上移/下移一位（供管理面板调用）。
+
+        name 固定首位：越界与 name 的移动都直接忽略。
+        """
+        if key == "name" or key not in self.col_order:
+            return
+        i = self.col_order.index(key)
+        j = i + (1 if delta > 0 else -1)
+        # 目标位置也跳过 name（不能把别的列换到 name 前面）
+        if j <= 0 or j >= len(self.col_order):
+            return
+        if self.col_order[j] == "name":
+            return
+        self.col_order[i], self.col_order[j] = self.col_order[j], self.col_order[i]
+        self.save_columns()
+        self._rebuild()
+
+    def reset_columns(self):
+        """恢复默认六列与默认顺序。"""
+        self.col_order = list(COL_KEYS)
+        self.col_hidden = set()
+        self._widen_ok = True
+        self.save_columns()
+        self._refresh_col_menu()
+        self._rebuild()
+
+    # ---------- 布局计算（F-04 / F-05） ----------
+    def _need_width(self, cols):
+        """cols 完整显示所需的窗口宽度（物理像素，含滚动条条带）。"""
+        fixed = sum(self.px(COL_DEF[k][3]) for k in cols if k != "name")
+        n = len([k for k in cols if k != "name"])
+        gaps = self.px(GAP) * max(0, len(cols) - 1)
+        return (self.px(PAD_L) + fixed + gaps + self.px(NAME_MIN_W)
+                + self.px(SB_W) + self.px(PAD_R))
+
+    def _layout_of(self, vis, win_w):
+        """按给定列集合与窗口宽度分列宽，返回 (col_x, CW)。
+
+        只做横向分配，不做降级判断——拖动缩放时要沿用"当前尚未变化"的列
+        集合，不能因为宽度跨阈值就改列数（改列数要重建画布，会打断拖拽）。
+        """
+        fix = sum(self.px(COL_DEF[k][3]) for k in vis if k != "name")
+        gaps = self.px(GAP) * max(0, len(vis) - 1)
+        CW = win_w - self.px(SB_W)
+        rest = CW - self.px(PAD_L) - self.px(PAD_R) - fix - gaps
+        name_w = max(self.px(NAME_MIN_W), rest)
+
+        col_x, x = {}, self.px(PAD_L)
+        for k in vis:
+            w = name_w if k == "name" else self.px(COL_DEF[k][3])
+            col_x[k] = (x, x + w)
+            x += w + self.px(GAP)
+        return col_x, CW
+
+    def compute_columns(self, win_w, enabled):
+        """算出本次实际显示的列、各列边界、所需最小宽度、是否显示表头。
+
+        纯函数（只读 COL_DEF 与 px），不改任何实例状态。
+        返回 (vis_cols, col_x, col_min_w, need_hdr)
+        """
+        # 1. 逐级降级：放不下就按 HIDE_ORDER 拿掉一列
+        vis = [k for k in enabled]
+        for k in HIDE_ORDER:
+            if self._need_width(vis) <= win_w:
+                break
+            if k in vis:
+                vis = [x for x in vis if x != k]
+        full = self._need_width(vis) <= win_w
+        col_min_w = self._need_width(vis)
+
+        # 2. 分列宽：固定列取定义值，名称列吃掉剩余
+        col_x, _CW = self._layout_of(vis, win_w)
+        need_hdr = bool(full and not self.folded)
+        return vis, col_x, col_min_w, need_hdr
+
     # ---------- 右键菜单 ----------
+    def _mk_check_imgs(self):
+        """生成菜单用的白色对勾 / 全透明占位图（16x16）。
+
+        文本符号（√ / ✓）的颜色不受我们控制：Tk 在 Windows 上自绘菜单项时，
+        label 里的符号字符会被按暗色渲染，深色菜单上几乎看不见；中文却正常
+        白色。菜单里唯一逐像素可控的是 image（带 image 的菜单项强制走 Tk
+        自绘），所以对勾用 PhotoImage 画，颜色恒为主题文字色（白）。
+        """
+        n = 16
+        on = tk.PhotoImage(width=n, height=n)
+        pts = set()
+
+        def seg(x0, y0, x1, y1):
+            steps = max(abs(x1 - x0), abs(y1 - y0)) + 1
+            for i in range(steps):
+                x = round(x0 + (x1 - x0) * i / (steps - 1))
+                y = round(y0 + (y1 - y0) * i / (steps - 1))
+                pts.add((x, y))
+                pts.add((x, y + 1))     # 加粗到 2px
+
+        seg(4, 8, 7, 11)                # 短笔
+        seg(7, 11, 13, 3)               # 长笔
+        for x, y in pts:
+            if 0 <= x < n and 0 <= y < n:
+                on.put(self.theme["text"], (x, y))
+        off = tk.PhotoImage(width=n, height=n)   # 全透明，仅占位对齐
+        self.img_chk_on, self.img_chk_off = on, off
+
+    def _refresh_col_menu(self):
+        """按当前 col_hidden 刷新「显示列」各菜单项的对勾与文字。"""
+        cm = getattr(self, "menu_cols", None)
+        if cm is None:
+            return
+        for key, idx in getattr(self, "col_entry", {}).items():
+            shown = key not in self.col_hidden
+            try:
+                cm.entryconfigure(idx, label=COL_DEF[key][0],
+                                  image=self.img_chk_on if shown
+                                  else self.img_chk_off,
+                                  compound="left")
+            except Exception:
+                pass
+
     def _build_menu(self):
         t = self.theme
         m = tk.Menu(self.root, tearoff=0, bg=t["head"], fg=t["text"],
@@ -333,6 +710,27 @@ class Panel:
 
         m.add_command(label="立即刷新", command=self.wake.set)
         m.add_separator()
+
+        # 显示列：5 个可隐藏列。不用 checkbutton（Windows 上勾选标记颜色
+        # 跟随 selectcolor 默认黑，深色菜单下看不见），也不用文本前缀 √
+        # （符号字符被按暗色渲染）；用白色对勾 PhotoImage，颜色恒可控。
+        # 隐藏列挂全透明同尺寸占位图，保证各菜单项文字左对齐一致。
+        cm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
+                     activebackground="#3B4A63", activeforeground="#FFFFFF",
+                     font=(self.f_cn, 9))
+        self.menu_cols = cm
+        self._mk_check_imgs()
+        self.col_entry = {}
+        for k in HIDE_ORDER:
+            shown = k not in self.col_hidden
+            # compound 必须显式设 left：菜单项默认 compound=none 时
+            # image 会整个替换文字（Tk 手册 menu(n)），那样就只剩一个勾
+            cm.add_command(label=COL_DEF[k][0],
+                           image=self.img_chk_on if shown else self.img_chk_off,
+                           compound="left",
+                           command=lambda key=k: self.toggle_column(key))
+            self.col_entry[k] = cm.index("end")
+        m.add_cascade(label="显示列", menu=cm)
 
         op = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
                      activebackground="#3B4A63", activeforeground="#FFFFFF",
@@ -375,7 +773,9 @@ class Panel:
         self.head_h = self.px(34)
         self.grp_h = self.px(20)
         self.row_h = self.px(25)
-        self.W = self.px(int(cfg.get("width", 268)))
+        # 宽度：先钳下限，再在"允许扩宽"时补到列宽所需
+        self.W = max(self.px(self.MIN_W), self.px(int(cfg.get("width", 268))))
+        enabled = self.enabled_cols()
 
         # 内容所需高度 vs 可视高度（超出则滚动）
         n = sum(len(g.get("items", [])) for g in groups)
@@ -392,11 +792,35 @@ class Panel:
             self.vis_h = min(need, limit)     # 自适应：跟内容长，超过 max_height 才滚动
         self.need_h = need
         self.body_r = self.px(16)                 # 圆角半径
-        # 内容画布比窗口正文矮一个圆角：底部那条留给 cv 画圆角底边
-        # （内容画布是真实子窗口，永远盖在 cv 之上，没法被 cv 的圆角遮罩覆盖）
-        self.vis_cc = max(self.row_h, self.vis_h - self.body_r)
+
+        # 布局计算：列集合 / 列坐标 / 最小宽度 / 是否画表头
+        # 扩宽许可单次消费：取出即复位，只有启动与"启用列"两条路径会置真。
+        # 判据必须用【启用列全集】的宽度 _need_width(enabled)，不能用
+        # compute_columns 返回的 col_min_w —— 后者是"降级后"那几列的宽度，
+        # 天然 <= W（降级就是因为放不下），拿它比较会让扩宽分支永不触发，
+        # 表现为"勾选列完全没反应"。
+        widen = self._widen_ok
+        self._widen_ok = False
+        if widen:
+            # 扩到"启用列刚好放得下"为止，不是一律拉到六列全宽：
+            # 用户本来就拖窄过窗口，只要能把新勾的列显示出来即可，
+            # 无脑拉满会把他调好的宽度冲掉。
+            before = self.W
+            self.W = max(self.W, self._need_width(enabled))
+            if self.W != before:
+                # 扩出来的宽度要落盘，否则下次启动又缩回去、再勾一次列才恢复
+                cfg["width"] = int(round(self.W / self.s))
+                save_json(CONFIG_FILE, cfg)
+        self.vis_cols, self.col_x, self.col_min_w, self.need_hdr = \
+            self.compute_columns(self.W, enabled)
+
+        # 内容画布比窗口正文矮表头 + 一个圆角（底部那条留给 cv 画圆角底边）
+        # vis_h 恒为"标题栏以下全部高度"，本身从不含表头
+        self.vis_cc = max(self.row_h, self.vis_h
+                          - (self.px(HDR_H) if self.need_hdr else 0) - self.body_r)
         self.scrollable = need > self.vis_cc
         self.H = self.head_h + self.vis_h
+        self.cc_top = self.head_h + (self.px(HDR_H) if self.need_hdr else 0)
 
         self.cv.delete("all")
         self.cv.configure(width=self.W, height=self.H, bg=KEY)
@@ -432,18 +856,23 @@ class Panel:
         # 内容画布：固定视口，内容超高时滚动
         # 右侧预留 SB_W 宽的条带给滚动条——内容画布是真实子窗口，
         # 画在它下面的 cv 元素会被盖住，所以滚动条必须落在条带里。
-        self.SB_W = self.px(10)
+        self.SB_W = self.px(SB_W)
         self.CW = self.W - self.SB_W
+        # 表头画在 cv 固定条带上（cc 会盖住 cv，所以不能画进 cc）
+        self._draw_header(self.cc_top)
+
         self.cc = tk.Canvas(self.cv, bg=t["bg"], highlightthickness=0, bd=0)
-        self.cc_win = self.cv.create_window(0, self.head_h, window=self.cc, anchor="nw",
+        self.cc_win = self.cv.create_window(0, self.cc_top, window=self.cc,
+                                            anchor="nw",
                                             width=self.CW, height=self.vis_cc)
         self.cc.configure(scrollregion=(0, 0, self.CW, need),
                           yscrollincrement=self.row_h)
         self._bind_canvas(self.cc)
 
         # 滚动条：轨道 + 滑块（在预留条带内，可拖动）
-        self.track_id = self.cv.create_rectangle(self.W - self.px(9), self.head_h,
-                                                 self.W - self.px(1), self.head_h + self.vis_cc,
+        self.track_id = self.cv.create_rectangle(self.W - self.px(9), self.cc_top,
+                                                 self.W - self.px(1),
+                                                 self.cc_top + self.vis_cc,
                                                  fill=t["line"], outline="", width=0)
         self.sb_id = self.cv.create_rectangle(0, 0, 0, 0,
                                               fill=t.get("bar", t["sub"]), outline="")
@@ -452,11 +881,11 @@ class Panel:
 
         y = 0
         for g in groups:
-            self.cc.create_text(self.px(14), y + self.grp_h / 2, anchor="w",
+            self.cc.create_text(self.px(PAD_L), y + self.grp_h / 2, anchor="w",
                                 text=g.get("name", ""), fill=t["sub"],
                                 font=(self.f_cn, 8))
-            self.cc.create_line(self.px(14) + self.px(52), y + self.grp_h / 2,
-                                self.CW - self.px(8), y + self.grp_h / 2,
+            self.cc.create_line(self.px(PAD_L) + self.px(52), y + self.grp_h / 2,
+                                self.CW - self.px(PAD_R), y + self.grp_h / 2,
                                 fill=t["line"])
             y += self.grp_h
 
@@ -465,17 +894,20 @@ class Panel:
                 if not code:
                     continue
                 cy = y + self.row_h / 2
-                name_id = self.cc.create_text(self.px(14), cy, anchor="w",
-                                              text=trunc(item.get("alias") or code),
-                                              fill=t["name"],
-                                              font=(self.f_cn, 9))
-                price_id = self.cc.create_text(self.CW - self.px(86), cy, anchor="e",
-                                               text="--", fill=t["flat"],
-                                               font=(self.f_num, 9, "bold"))
-                pct_id = self.cc.create_text(self.CW - self.px(8), cy, anchor="e",
-                                             text="--", fill=t["flat"],
-                                             font=(self.f_num, 9, "bold"))
-                self.rows.append((code, name_id, price_id, pct_id, item.get("alias")))
+                ids = {}
+                for k in self.vis_cols:
+                    x0, x1 = self.col_x[k]
+                    if k == "name":
+                        ids[k] = self.cc.create_text(x0, cy, anchor="w",
+                                                     text=trunc(item.get("alias") or code),
+                                                     fill=t["name"],
+                                                     font=(self.f_cn, 9))
+                    else:
+                        ids[k] = self.cc.create_text(x1, cy, anchor="e",
+                                                     text=PLACEHOLDER_NONE,
+                                                     fill=t["flat"],
+                                                     font=(self.f_num, 9, "bold"))
+                self.rows.append((code, item.get("alias"), ids))
                 self.hit.append((y, y + self.row_h, code))
                 y += self.row_h
 
@@ -512,8 +944,32 @@ class Panel:
                      style="pieslice", fill=t["head"], outline="", tags="body")
         c.tag_lower("body")
 
+    def _draw_header(self, cc_top):
+        """在 cv 的固定条带画列名（F-11）。
+
+        表头必须画在 cv 上：cc 是真实子窗口，永远盖在 cv 之上，
+        画进 cc 就会跟着内容滚走。表头与数据共用同一份 col_x 与 CW，
+        因此两者天然逐列对齐，不需要额外偏移。
+        """
+        t = self.theme
+        if not self.need_hdr:
+            return
+        ctop = cc_top - self.px(HDR_H)
+        y = ctop + self.px(HDR_H) / 2
+        for k in self.vis_cols:
+            text = COL_DEF[k][1]
+            if not text:
+                continue
+            x1 = self.col_x[k][1]
+            self.cv.create_text(x1, y, anchor="e", text=text, fill=t["sub"],
+                                font=(self.f_cn, HDR_FONT_SIZE),
+                                tags=("hdr", "h_" + k))
+        # 分隔线画在表头下沿，与数据区宽度一致
+        self.cv.create_line(0, cc_top, self.CW, cc_top,
+                            fill=t["line"], tags=("hdr", "h_line"))
+
     def _draw_masks(self):
-        """四角遮罩：把圆角外的那小块重新涂成 KEY。
+        """四角遮罩：把四个角擦回 KEY 色（透明）。
 
         形状主体是先画的，之后标题文字/滚动条/内容画布等元素会画在上面，
         可能越过圆角边界。这里在最后用 KEY 色把 4 个角重新"擦"成透明，
@@ -542,10 +998,15 @@ class Panel:
         self.update_scrollbar()
 
     def _ev_y(self, e):
-        """把事件坐标统一换算到主画布坐标系（内容画布有 head_h 偏移）。"""
+        """把事件坐标统一换算到主画布坐标系（内容画布有 cc_top 偏移）。
+
+        基准必须是 cc_top 而不是 head_h：表头占了 cc_top - head_h 那一带，
+        用 head_h 换算会让拖拽固定偏移一个表头高（150% 下 27 物理像素），
+        表现为鼠标与滑块脱节。
+        """
         y = e.y
         if getattr(e, "widget", None) is getattr(self, "cc", None):
-            y += self.head_h
+            y += self.cc_top
         return y
 
     def sb_press(self, e):
@@ -558,7 +1019,7 @@ class Panel:
             return "break"
         total = max(1, self.need_h)
         vis = max(1, self.vis_cc)
-        track_top = self.head_h + self.px(3)
+        track_top = self.cc_top + self.px(3)
         track_h = max(self.px(24), vis - self.px(6))
         thumb_h = max(self.px(22), track_h * min(1.0, vis / total))
         travel = max(1, track_h - thumb_h)
@@ -580,7 +1041,7 @@ class Panel:
         vis = max(1, getattr(self, "vis_cc", self.vis_h))
         # 滑块长度按可视比例解析计算：不能依赖 yview()——窗口尚未完成
         # 布局时（尺寸 1x1）它会返回 (0, 0.001)，把滑块算成一根残条
-        track_top = self.head_h + self.px(3)
+        track_top = self.cc_top + self.px(3)
         track_h = max(self.px(24), vis - self.px(6))
         thumb_h = max(self.px(22), track_h * min(1.0, vis / total))
         travel = max(0, track_h - thumb_h)
@@ -649,12 +1110,7 @@ class Panel:
 
     def _dbg(self, msg):
         """自愈诊断日志（仅异常时写入，正常情况零开销）。"""
-        try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "ticker.log"), "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().strftime('%m-%d %H:%M:%S')} {msg}\n")
-        except Exception:
-            pass
+        log_once(msg)
 
     def center_first(self):
         self.root.lift()
@@ -665,34 +1121,69 @@ class Panel:
         tra = is_trading()
         if self.err:
             self.cv.itemconfig(self.dot, fill=t["up"])
-            tip = "连接失败"
         elif tra:
             self.cv.itemconfig(self.dot, fill=t["down"])
-            tip = None
         else:
             self.cv.itemconfig(self.dot, fill=t["flat"])
-            tip = "休市"
 
         c = self.cc if self.cc is not None else self.cv
-        for code, nid, pid, cid, alias in self.rows:
+        for code, alias, ids in self.rows:
             d = self.data.get(code)
-            if not d:
-                c.itemconfig(nid, fill=t["name"])
-                if not self.data:
-                    continue
-                c.itemconfig(pid, text="--", fill=t["flat"])
-                c.itemconfig(cid, text=tip or "--", fill=t["flat"])
+
+            # ① 正常行：数值列跟随该行 pct 变色，行业列恒 sub
+            if d:
+                pct = d["pct"]
+                color = t["up"] if pct > 0 else (t["down"] if pct < 0 else t["flat"])
+                if "name" in ids:
+                    if not alias:               # 没设别名时用接口返回的名称
+                        c.itemconfig(ids["name"], text=trunc(d["name"]))
+                    c.itemconfig(ids["name"], fill=t["name"])
+                if "price" in ids:
+                    c.itemconfig(ids["price"], text=fmt_price(d["price"]), fill=color)
+                if "pct" in ids:
+                    c.itemconfig(ids["pct"], text=f"{pct:+.2f}%", fill=color)
+                if "vr" in ids:
+                    v = d.get("vr")
+                    c.itemconfig(ids["vr"], fill=color,
+                                 text=PLACEHOLDER_NA if v is None else f"{v:.2f}")
+                if "turnover" in ids:
+                    v = d.get("turnover")
+                    c.itemconfig(ids["turnover"], fill=color,
+                                 text=PLACEHOLDER_NA if v is None else f"{v:.2f}%")
+                if "industry" in ids:
+                    c.itemconfig(ids["industry"], fill=t["sub"],
+                                 text=self.ind.get(code) or PLACEHOLDER_NA)
                 continue
-            pct = d["pct"]
-            color = t["up"] if pct > 0 else (t["down"] if pct < 0 else t["flat"])
-            if not alias:                       # 没设别名时用接口返回的名称
-                c.itemconfig(nid, text=trunc(d["name"]))
-            c.itemconfig(nid, fill=t["name"])
-            c.itemconfig(pid, text=fmt_price(d["price"]), fill=color)
-            c.itemconfig(cid, text=f"{pct:+.2f}%", fill=color)
+
+            # ② 单只缺数据（停牌/未开盘）与 ③ 整体无数据：名称不动，其余五列 --
+            if "name" in ids:
+                c.itemconfig(ids["name"], fill=t["name"])
+            for k in ("price", "pct", "vr", "turnover"):
+                if k in ids:
+                    c.itemconfig(ids[k], text=PLACEHOLDER_NONE, fill=t["flat"])
+            if "industry" in ids:
+                c.itemconfig(ids["industry"], text=PLACEHOLDER_NONE, fill=t["sub"])
 
         if self.err:
             self.cv.itemconfig(self.clock, text="连接失败", fill=t["up"])
+
+    def paint_ind(self):
+        """只刷行业列：行业数据独立到货，不必整表重画。
+
+        取值与 paint 的三档共用同一口径 —— 整行无行情(停牌/整体失败)
+        写 --，有行情但行业取不到写 —。
+        """
+        if self.cc is None:
+            return
+        t = self.theme
+        for code, _alias, ids in self.rows:
+            if "industry" not in ids:
+                continue
+            if self.data.get(code):
+                txt = self.ind.get(code) or PLACEHOLDER_NA
+            else:
+                txt = PLACEHOLDER_NONE
+            self.cc.itemconfig(ids["industry"], text=txt, fill=t["sub"])
 
     def poll(self):
         try:
@@ -702,11 +1193,18 @@ class Panel:
             try:
                 while True:
                     kind, payload = self.q.get_nowait()
+                    # 分支顺序不可调换：ind 若落到 else 会被当成行情错误，
+                    # 标题栏圆点变红、paint 走"连接失败"档
                     if kind == "ok":
                         self.data, self.err = payload, None
+                        self.paint()
+                    elif kind == "ind":
+                        self.ind = payload or {}
+                        self.ind_ready = True
+                        self.paint_ind()
                     else:
                         self.err = payload
-                    self.paint()
+                        self.paint()
             except queue.Empty:
                 pass
         except Exception as e:
@@ -728,6 +1226,50 @@ class Panel:
                 pass
             self.root.after(1000, self._tick)
 
+    def _prepare_industry(self, retry=False):
+        """准备行业数据：读缓存 + 必要时后台请求一次。
+
+        只读 cfg 与缓存文件，绝不直接写 self.ind（线程边界：self.ind 只在
+        UI 线程 poll 内赋值）。行业列被关掉时整体跳过，不产生任何流量。
+
+        retry=True 走"用户重新勾选行业列"的补发路径：即使上次已经跑过
+        也能再起一次，但每个进程最多补发一次（由 self._ind_retry 去重）。
+        """
+        if "industry" in self.col_hidden or not self.codes():
+            return
+        if self.ind:
+            return
+        if retry:
+            if self._ind_retry:
+                return
+            self._ind_retry = True
+        elif self._ind_requested:
+            return
+        self._ind_requested = True
+        threading.Thread(target=self._industry_worker, daemon=True).start()
+
+    def _industry_worker(self):
+        """后台取行业：先投递缓存旧值，再请求新值，成功则落盘。
+
+        与行情线程分离：行业不随 5 秒刷新，每次运行最多一趟。
+        """
+        try:
+            old = load_industry_cache() or {}
+            if old:
+                self.q.put(("ind", old))          # 先让界面有值可显示
+            cs = [c for c in self.codes() if need_industry(c)]
+            if not cs:
+                return
+            fresh = fetch_industries(cs)
+            if not fresh:
+                return                            # 失败保留旧值，不重试
+            merged = dict(old)
+            merged.update(fresh)
+            save_industry_cache(merged)
+            self.q.put(("ind", merged))
+        except Exception as e:
+            self._dbg(f"ind 异常: {e!r}")
+
     def codes(self):
         out, seen = [], set()
         for g in self.cfg.get("groups", []):
@@ -739,6 +1281,7 @@ class Panel:
         return out
 
     def loop(self):
+        self._prepare_industry()          # 首轮前起行业线程，之后不再管
         while not self.stop:
             cs = self.codes()
             if cs:
@@ -752,7 +1295,7 @@ class Panel:
 
     # ---------- 交互 ----------
     MIN_W = 190          # 最小宽度（逻辑像素）
-    MIN_H = 90           # 最小高度（逻辑像素）
+    MIN_H = 96           # 最小高度（逻辑像素）：标题栏 34 + 表头 18 + 1 行 25 + 底弧 16
     EDGE = 5             # 边缘热区宽度（逻辑像素）
     _CURSORS = {"n": "size_ns", "s": "size_ns", "w": "size_we", "e": "size_we",
                 "nw": "size_nw_se", "se": "size_nw_se",
@@ -839,6 +1382,12 @@ class Panel:
         self.W, self.H = int(w), int(h)
         self._last_pos = (int(x), int(y))
         self.root.geometry(f"{self.W}x{self.H}+{int(x)}+{int(y)}")
+        # 尺寸即时同步进内存里的 cfg：拖动中若有任何路径触发 _rebuild，
+        # build 才不会拿旧值把窗口拽回原大小。只改内存不落盘，写文件
+        # 仍交给 on_release，免得每帧都做一次 IO。
+        self.cfg["width"] = int(round(self.W / self.s))
+        if not self.folded:
+            self.cfg["height"] = int(round(self.H / self.s))
         self._resize_live()
 
     def _invalidate(self, now=False):
@@ -867,26 +1416,58 @@ class Panel:
             pass
 
     def _resize_live(self):
-        """缩放过程中的轻量重排：只动视口/圆角/滚动条，不重建整行文字。"""
+        """缩放过程中的轻量重排：只动视口/圆角/滚动条/列坐标，不重建整行文字。
+
+        宽度变化会改变各列边界，所以这里要重算 col_x 并把现存 item 挪到新
+        位置（改坐标不等于重建 item）。need_hdr 翻转（列被降级掉或加回来）
+        不在这里处理：那要增删列文字，交给松手后的 _rebuild。
+        """
         try:
             if self.vis_h != self.H - self.head_h:
                 self.vis_h = max(self.row_h, self.H - self.head_h)
-            self.vis_cc = max(self.row_h, self.vis_h - self.body_r)
-            self.CW = self.W - self.SB_W
+            enabled = self.enabled_cols()
+            vis_want, col_x_want, col_min_w, need_hdr = \
+                self.compute_columns(self.W, enabled)
+            # 拖动中绝不调用 _rebuild：它会销毁正在接收 B1-Motion 的 canvas，
+            # 拖拽当场断掉；而且 build 会按配置里的旧 width/height 重算尺寸，
+            # 窗口一跨过列降级阈值就弹回原大小，表现为"窗口不能自由缩放"。
+            # 这里先沿用当前列集合按新宽度重排，列数变化留到松手后统一重建。
+            if vis_want != self.vis_cols or need_hdr != self.need_hdr:
+                col_x, self.CW = self._layout_of(self.vis_cols, self.W)
+            else:
+                col_x, self.CW = col_x_want, self.W - self.SB_W
+            self.col_x, self.col_min_w = col_x, col_min_w
+            self.vis_cc = max(self.row_h, self.vis_h
+                              - (self.px(HDR_H) if self.need_hdr else 0) - self.body_r)
+            self.cc_top = self.head_h + (self.px(HDR_H) if self.need_hdr else 0)
             if self.cc_win and self.cc is not None:
                 self.cv.itemconfigure(self.cc_win, width=self.CW, height=self.vis_cc)
-                self.cv.coords(self.cc_win, 0, self.head_h)
+                self.cv.coords(self.cc_win, 0, self.cc_top)
             if self.track_id:
-                self.cv.coords(self.track_id, self.W - self.px(9), self.head_h,
-                               self.W - self.px(1), self.head_h + self.vis_cc)
-                self.cv.coords(self.clock, self.W - self.px(13), self.head_h / 2)
+                self.cv.coords(self.track_id, self.W - self.px(9), self.cc_top,
+                               self.W - self.px(1), self.cc_top + self.vis_cc)
+            self.cv.coords(self.clock, self.W - self.px(13), self.head_h / 2)
             self.scrollable = self.need_h > self.vis_cc
+            self._relayout_cols()
             # 形状随尺寸重画，最后把圆角遮罩压回最上层
             self._draw_body()
             self.update_scrollbar()
             self._draw_masks()
         except Exception as ex:
             self._dbg(f"resize 异常: {ex!r}")
+
+    def _relayout_cols(self):
+        """按当前 col_x 把表头与各列文字挪到位（缩放时逐帧调用，不新建 item）。"""
+        y = self.cc_top - self.px(HDR_H) / 2
+        for key in self.vis_cols:
+            tag = "h_" + key
+            if COL_DEF[key][1]:
+                self.cv.coords(tag, self.col_x[key][1], y)
+        self.cv.coords("h_line", 0, self.cc_top, self.CW, self.cc_top)
+        for _code, _alias, ids in self.rows:
+            for key, iid in ids.items():
+                x = self.col_x[key][0] if key == "name" else self.col_x[key][1]
+                self.cc.coords(iid, x, self.cc.coords(iid)[1])
 
     def on_release(self, e):
         self._sbdrag = False
@@ -937,6 +1518,7 @@ class Panel:
 
     def on_menu(self, e):
         self.var_top.set(bool(self.root.attributes("-topmost")))
+        self._refresh_col_menu()      # 每次弹出前对齐 ✓ 与实际显示列
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1004,6 +1586,9 @@ class Panel:
         self.theme = THEMES.get(self.cfg.get("theme", "dark"), THEMES["dark"])
         self.set_alpha(float(self.cfg.get("alpha", self.alpha)))
         self._rebuild()
+        # 主题可能变了：菜单颜色与对勾位图要按新主题重画（_build_menu
+        # 会顺带重建 img_chk_*，旧菜单对象整体替换，无引用残留）
+        self.menu = self._build_menu()
         self.wake.set()
 
     # ---------- 开机自启 ----------
@@ -1126,9 +1711,10 @@ class InputBox:
 
 
 class WatchlistDialog:
-    """仿行情软件的自选管理面板：搜索添加、删除、排序、改别名。"""
+    """仿行情软件的自选管理面板：搜索添加、删除、排序、改别名、调列。"""
 
-    W, H = 430, 522
+    W, H = 430, 600
+    TABS = ("标的", "列")
 
     C_BG = "#151A24"
     C_HEAD = "#1D2431"
@@ -1154,6 +1740,9 @@ class WatchlistDialog:
         self.q = queue.Queue()
         self.search_after = None
         self.closed = False
+        self.tab = "标的"
+        self._tab_items = {"标的": [], "列": []}   # 页签 -> 画布 item id
+        self._cur_tab = "标的"                      # 新建控件归属的页签
 
         self.dlg = tk.Toplevel(app.root)
         self.dlg.withdraw()
@@ -1186,8 +1775,9 @@ class WatchlistDialog:
         b = tk.Button(self.dlg, text=text, command=cmd, font=(self.f_cn, 9),
                       bg=bg, fg=fg, activebackground=act, activeforeground=fg,
                       relief="flat", bd=0, highlightthickness=0, cursor="hand2")
-        self.cv.create_window(self.px(x), self.px(y), window=b, anchor="nw",
-                              width=self.px(w), height=self.px(h))
+        wid = self.cv.create_window(self.px(x), self.px(y), window=b, anchor="nw",
+                                    width=self.px(w), height=self.px(h))
+        self._tab_items[self._cur_tab].append(wid)
         return b
 
     def _listbox(self, x, y, w, h, on_double=None, on_delete=None, tag=None):
@@ -1195,15 +1785,17 @@ class WatchlistDialog:
                         selectbackground=self.C_ACCENT, selectforeground="#FFFFFF",
                         relief="flat", bd=0, highlightthickness=0, activestyle="none",
                         selectmode="browse", exportselection=False)
-        self.cv.create_window(self.px(x), self.px(y), window=lb, anchor="nw",
-                              width=self.px(w), height=self.px(h))
+        wid = self.cv.create_window(self.px(x), self.px(y), window=lb, anchor="nw",
+                                    width=self.px(w), height=self.px(h))
+        self._tab_items[self._cur_tab].append(wid)
         sb = tk.Scrollbar(self.dlg, orient="vertical", command=lb.yview,
                           width=self.px(9), bg=self.C_HEAD, troughcolor=self.C_PANEL,
                           activebackground=self.C_ACCENT, relief="flat", bd=0,
                           highlightthickness=0, elementborderwidth=0)
         lb.config(yscrollcommand=sb.set)
-        self.cv.create_window(self.px(x + w + 3), self.px(y), window=sb, anchor="nw",
-                              width=self.px(9), height=self.px(h))
+        sid = self.cv.create_window(self.px(x + w + 3), self.px(y), window=sb, anchor="nw",
+                                    width=self.px(9), height=self.px(h))
+        self._tab_items[self._cur_tab].append(sid)
         lb.bind("<MouseWheel>", lambda e: lb.yview_scroll(int(-e.delta / 120), "units"))
         if on_double:
             lb.bind("<Double-Button-1>", on_double)
@@ -1236,44 +1828,149 @@ class WatchlistDialog:
         self.cv.bind("<B1-Motion>", self.on_drag)
         self.dlg.bind("<Escape>", lambda e: self.close())
 
-        # 搜索行
+        # 页签行：两个常驻按钮 + 各自的下划线，当前页高亮
+        self.tab_ids = {}
+        for i, name in enumerate(self.TABS):
+            x = self.px(16 + i * 64)
+            t1 = self.cv.create_text(x, self.px(58), anchor="w", text=name,
+                                     fill=self.C_TEXT if name == self.tab else self.C_SUB,
+                                     font=(self.f_cn, 10, "bold" if name == self.tab else "normal"))
+            line = self.cv.create_line(x, self.px(72), x + self.px(40), self.px(72),
+                                       fill=self.C_ACCENT if name == self.tab else self.C_BORDER,
+                                       width=2 if name == self.tab else 1)
+            self.tab_ids[name] = (t1, line)
+            for iid in (t1, line):
+                self.cv.tag_bind(iid, "<Button-1>", lambda e, n=name: self.on_tab(n))
+
+        self._cur_tab = "标的"
+
+        # 搜索行（标的页整体下移 40，给页签行让位）
         self.var_kw = tk.StringVar()
         self.ent = tk.Entry(self.dlg, textvariable=self.var_kw, font=(self.f_cn, 10),
                             bg=self.C_PANEL, fg=self.C_SUB, insertbackground=self.C_TEXT,
                             relief="flat", highlightthickness=1,
                             highlightbackground=self.C_BORDER, highlightcolor=self.C_ACCENT)
-        self.cv.create_window(self.px(16), self.px(52), window=self.ent, anchor="nw",
-                              width=self.px(316), height=self.px(34))
+        ent_win = self.cv.create_window(self.px(16), self.px(92), window=self.ent,
+                                        anchor="nw", width=self.px(316),
+                                        height=self.px(34))
+        self._tab_items["标的"].append(ent_win)
+
         self.ent.insert(0, self.PH)
         self.ent.bind("<FocusIn>", self.ph_in)
         self.ent.bind("<FocusOut>", self.ph_out)
         self.ent.bind("<KeyRelease>", self.on_key)
         self.ent.bind("<Return>", lambda e: self.do_search())
-        self._button(340, 52, 74, 34, "搜索", self.do_search, "primary")
+        self._button(340, 92, 74, 34, "搜索", self.do_search, "primary")
 
         # 搜索结果
-        self.cv.create_text(self.px(16), self.px(104), anchor="w", text="搜索结果",
-                            fill=self.C_SUB, font=(self.f_cn, 8))
-        self.stat_res = self.cv.create_text(W - self.px(16), self.px(104), anchor="e",
+        self._tab_items["标的"].append(self.cv.create_text(
+            self.px(16), self.px(144), anchor="w", text="搜索结果",
+            fill=self.C_SUB, font=(self.f_cn, 8)))
+        self.stat_res = self.cv.create_text(W - self.px(16), self.px(144), anchor="e",
                                             text="", fill=self.C_SUB, font=(self.f_cn, 8))
-        self.lb_res = self._listbox(16, 114, 386, 146, on_double=self.add_pick)
+        self._tab_items["标的"].append(self.stat_res)
+        self.lb_res = self._listbox(16, 154, 386, 146, on_double=self.add_pick)
 
-        self._button((self.W - 92) // 2, 265, 92, 28, "添加到自选 ↓",
+        self._button((self.W - 92) // 2, 305, 92, 28, "添加到自选 ↓",
                      self.add_pick, "ghost")
 
         # 自选列表
-        self.tip_sel = self.cv.create_text(self.px(16), self.px(308), anchor="w",
-                                           text="自选列表", fill=self.C_SUB,
-                                           font=(self.f_cn, 8))
-        self.lb_sel = self._listbox(16, 320, 386, 140, on_double=self.rename,
+        self.tip_sel = self.cv.create_text(
+            self.px(16), self.px(348), anchor="w", text="自选列表",
+            fill=self.C_SUB, font=(self.f_cn, 8))
+        self._tab_items["标的"].append(self.tip_sel)
+        self.lb_sel = self._listbox(16, 360, 386, 160, on_double=self.rename,
                                     on_delete=lambda e: self.remove_pick())
 
-        # 底部按钮
-        self._button(16, 474, 34, 32, "↑", lambda: self.move(-1))
-        self._button(56, 474, 34, 32, "↓", lambda: self.move(1))
-        self._button(96, 474, 62, 32, "删除", self.remove_pick, "danger")
-        self._button(272, 474, 68, 32, "取消", self.close)
-        self._button(348, 474, 66, 32, "保存", self.save, "primary")
+        # 底部按钮（标的页专属）
+        self._button(16, 544, 34, 32, "↑", lambda: self.move(-1))
+        self._button(56, 544, 34, 32, "↓", lambda: self.move(1))
+        self._button(96, 544, 62, 32, "删除", self.remove_pick, "danger")
+        self._button(272, 544, 68, 32, "取消", self.close)
+        self._button(348, 544, 66, 32, "保存", self.save, "primary")
+
+        # 列页签内容
+        self._cur_tab = "列"
+        self.draw_cols_tab()
+        self._cur_tab = "标的"
+        self.on_tab(self.tab)          # 按初始页签收敛显隐
+
+    # ---------- 页签 ----------
+    def on_tab(self, name):
+        """切换页签：只切两组 item 的 state，控件一律不销毁。"""
+        self.tab = name
+        for tab in self.TABS:
+            state = "normal" if tab == name else "hidden"
+            for iid in self._tab_items[tab]:
+                try:
+                    self.cv.itemconfig(iid, state=state)
+                except Exception:
+                    pass
+            t1, line = self.tab_ids[tab]
+            on = tab == name
+            self.cv.itemconfig(t1, fill=self.C_TEXT if on else self.C_SUB,
+                               font=(self.f_cn, 10, "bold" if on else "normal"))
+            self.cv.itemconfig(line, fill=self.C_ACCENT if on else self.C_BORDER,
+                               width=2 if on else 1)
+        if name == "标的":
+            self.ent.focus_set()
+        else:
+            self.dlg.focus_set()
+
+    # ---------- 列页签 ----------
+    def draw_cols_tab(self):
+        """列清单：6 行（序号 + 列名 + ↑↓），首行 ↑ 与末行 ↓ 禁用。"""
+        order = self.app.col_order
+        self._tab_items["列"].append(self.cv.create_text(
+            self.px(16), self.px(92), anchor="w",
+            text="拖动上下按钮调整列的显示顺序（名称列固定在首位）",
+            fill=self.C_SUB, font=(self.f_cn, 8)))
+        row_h = 46
+        for i, key in enumerate(order):
+            y = 110 + i * row_h
+            disabled = self.app.col_hidden
+            mark = "" if key not in disabled else "（已隐藏）"
+            self._tab_items["列"].append(self.cv.create_text(
+                self.px(24), self.px(y + 14), anchor="w",
+                text=f"{i + 1}.  {COL_DEF[key][0]}{mark}",
+                fill=self.C_SUB if key in disabled else self.C_TEXT,
+                font=(self.f_cn, 10)))
+            up = self._button(340, y, 34, 30, "↑",
+                              lambda k=key: self.move_col(k, -1), "ghost")
+            dn = self._button(380, y, 34, 30, "↓",
+                              lambda k=key: self.move_col(k, 1), "ghost")
+            if i == 0 or key == "name":
+                up.config(state="disabled")
+            if i == len(order) - 1:
+                dn.config(state="disabled")
+        self._button(16, 544, 96, 32, "恢复默认", self.reset_cols, "danger")
+
+    def move_col(self, key, delta):
+        """调列顺序 → 主窗重排 → 重画本页清单。"""
+        self.app.move_column(key, delta)
+        self.refresh_cols()
+
+    def reset_cols(self):
+        self.app.reset_columns()
+        self.refresh_cols()
+
+    def refresh_cols(self):
+        """列顺序变化后重画列页（先删旧 item 再重建，随后按当前页签收敛显隐）。"""
+        for iid in self._tab_items["列"]:
+            try:
+                self.cv.delete(iid)
+            except Exception:
+                pass
+        self._tab_items["列"].clear()
+        self._cur_tab = "列"
+        self.draw_cols_tab()
+        self._cur_tab = "标的"
+        if self.tab != "列":
+            for iid in self._tab_items["列"]:
+                try:
+                    self.cv.itemconfig(iid, state="hidden")
+                except Exception:
+                    pass
 
     def place(self):
         W, H = self.px(self.W), self.px(self.H)
@@ -1487,14 +2184,48 @@ def selftest():
         if not d:
             print(f"  !! {c:<12} 无数据")
             continue
-        print(f"  {d['name']:<10} {fmt_price(d['price']):>10}  {d['pct']:+6.2f}%  @{stamp_hm(d['stamp'])}")
+        vr = "—" if d.get("vr") is None else f"{d['vr']:.2f}"
+        to = "—" if d.get("turnover") is None else f"{d['turnover']:.2f}%"
+        print(f"  {d['name']:<10} {fmt_price(d['price']):>10}  {d['pct']:+6.2f}%"
+              f"  量比 {vr:>5}  换手 {to:>6}  @{stamp_hm(d['stamp'])}")
     print("[market]", "交易中" if is_trading() else "休市")
+
+    # 列布局：六列全开时的所需宽度与降级结果
+    class _S:
+        s = get_scale()
+        folded = False
+        def px(self, v): return int(round(v * _S.s))
+        def _need_width(self, cols): return Panel._need_width(self, cols)
+        def compute_columns(self, w, en): return Panel.compute_columns(self, w, en)
+    st = _S()
+    print(f"[cols  ] 缩放 {st.s:.2f}  六列需宽 {st._need_width(COL_KEYS) / st.s:.0f}"
+          f"（逻辑像素）  最小高 {Panel.MIN_H}")
+    for w in (420, 312, 180, 150):
+        vis, _cx, _mn, hdr = st.compute_columns(st.px(w), list(COL_KEYS))
+        print(f"         W={w:>4} → {'/'.join(vis)}  表头={'显示' if hdr else '隐藏'}")
+
+    # 行业：只报告可用性，失败不影响退出码
+    indie = [c for c in codes if need_industry(c)]
+    if indie:
+        t1 = time.time()
+        got = fetch_industries(indie)
+        if got:
+            print(f"[ind   ] {len(got)}/{len(indie)} 条，用时 {time.time()-t1:.2f}s")
+            for c in indie:
+                print(f"  {c:<12} {got.get(c) or '—'}")
+        else:
+            print(f"[ind   ] 请求失败（{time.time()-t1:.2f}s），界面显示 —，不影响行情")
 
 
 def main():
     app = Panel()
     if "--watchlist" in sys.argv:      # 调试用：启动即打开自选管理
         app.root.after(700, app.open_watchlist)
+    if "--cols-tab" in sys.argv:       # 调试用：打开管理面板并切到列页签
+        def _to_cols():
+            if app.dlg is not None:
+                app.dlg.on_tab("列")
+        app.root.after(1100, _to_cols)
     app.run()
 
 

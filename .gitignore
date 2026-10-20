@@ -1,6 +1,7 @@
 # 本地运行产生的个人数据，不入库
 position.json
 ticker.log
+industry_cache.json
 __pycache__/
 *.pyc
 *.bak
