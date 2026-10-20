@@ -5,7 +5,7 @@
   "topmost": true,
   "trading_refresh": 5,
   "idle_refresh": 60,
-  "width": 263,
+  "width": 358,
   "max_height": 460,
   "groups": [
     {
@@ -91,5 +91,18 @@
       ]
     }
   ],
-  "height": 465
+  "columns": {
+    "order": [
+      "name",
+      "price",
+      "pct",
+      "vr",
+      "turnover",
+      "industry"
+    ],
+    "hidden": [
+      "industry"
+    ]
+  },
+  "height": 565
 }
