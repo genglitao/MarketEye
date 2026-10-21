@@ -5,3 +5,7 @@ industry_cache.json
 __pycache__/
 *.pyc
 *.bak
+
+# 测试脚本沙箱配置，不入库
+_tc_*.json
+_tc_*.log
