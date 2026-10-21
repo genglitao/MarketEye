@@ -102,6 +102,20 @@ NAME_MIN_W = 60     # 名称列最小宽度
 PLACEHOLDER_NA = "—"   # 字段有行情但该字段无数据
 PLACEHOLDER_NONE = "--"  # 整行无行情（停牌/未开盘/请求失败）
 
+# ---------------------------------------------------------------- 折叠态轮播
+# 折叠后标题栏中部轮播「指数名称  涨跌幅」，数据取「宽基指数」分组。
+MARQ_GROUP_NAME = "宽基指数"          # 轮播源分组名，精确匹配（不 strip、不忽略大小写）
+MARQ_INTERVAL_CHOICES = (2, 3, 5, 10)  # 可选档位（秒）
+MARQ_INTERVAL_DEFAULT = 3             # 默认档位（秒）
+MARQ_FONT_SIZE = 9                    # 正数点数，避免 Tk 在缩放下的负值像素解释
+MARQ_GAP_L = 8                        # 标题右侧间距（逻辑像素，经 px()）
+MARQ_GAP_R = 10                       # 时钟左侧间距（逻辑像素，经 px()）
+MARQ_SEP = "  "                       # 名称与涨跌幅之间：两个半角空格
+# 渲染门槛不设常量：marq_bounds 里按当前字体实测派生 self._marq_min_w
+# （两字名称 + 分隔 + 一条涨跌幅），DPI 100%~200% 自动跟随
+MARQ_EMPTY = "—"                      # 涨跌幅缺失占位（与 PLACEHOLDER_NA 同字符）
+MARQ_ELLIPSIS = "…"                   # 名称截断后缀
+
 # 行业数据
 IND_CACHE_FILE = os.path.join(BASE, "industry_cache.json")
 IND_TTL_DAYS = 7
@@ -193,6 +207,65 @@ def is_index_code(code):
     if body.startswith("399") or body.startswith("000") and c.startswith("sh"):
         return True
     return False
+
+
+def is_index_like(code):
+    """是否为「指数类」标的：沪深指数段 + 港股代码含字母。
+
+    与 is_index_code 刻意分开：后者服务于浏览器跳转的 zs/gp 判定，把全部
+    港股都算指数，语义不同。这里要给轮播兜底，必须排除个股与 ETF/LOF
+    （sh510500 / sz159865 这类都不是 sh000 / sz399 段，天然排除）。
+    """
+    c = code.lower()
+    if c.startswith("hk"):
+        return any(ch.isalpha() for ch in c[2:])
+    body = c[2:]
+    if c.startswith("sh"):
+        return body.startswith("000")
+    if c.startswith("sz"):
+        return body.startswith("399")
+    return False
+
+
+def marq_list(cfg):
+    """构建折叠态轮播清单 [(code, alias)]，三段式：
+
+    1. 存在 name 精确等于「宽基指数」的分组且非空 -> HIT，用该分组
+    2. 否则回退：全部分组里按 is_index_like 过滤，按首次出现顺序去重
+    3. 仍为空 -> EMPTY（轮播区不渲染）
+
+    只接收 cfg，不依赖 Panel 实例，便于 --selftest 直接调用。
+    """
+    groups = cfg.get("groups")
+    if not isinstance(groups, list):
+        return []
+    for g in groups:
+        if not isinstance(g, dict) or g.get("name") != MARQ_GROUP_NAME:
+            continue
+        out = []
+        items = g.get("items")
+        for it in items if isinstance(items, list) else ():
+            if isinstance(it, dict):
+                c = normalize(it.get("code", ""))
+                if c:
+                    out.append((c, it.get("alias")))
+        if out:
+            return out
+        break                       # 命中了但空：走回退，不再找同名分组
+
+    out, seen = [], set()
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        items = g.get("items")
+        for it in items if isinstance(items, list) else ():
+            if not isinstance(it, dict):
+                continue
+            c = normalize(it.get("code", ""))
+            if c and c not in seen and is_index_like(c):
+                seen.add(c)
+                out.append((c, it.get("alias")))
+    return out
 
 
 def is_trading(now=None):
@@ -469,6 +542,17 @@ class Panel:
         self.hit = []       # [(y0, y1, code)]
         self.dlg = None     # 自选管理面板
 
+        # 折叠态轮播：必须早于 _build_menu（建菜单会读档位设对勾并填 marq_entry）
+        self.marq_items = []        # [(code, alias)]，展开态恒为空
+        self.marq_idx = 0           # 当前条目下标
+        self.marq_dirty = True      # 边沿标记：本次折叠尚未重建清单
+        self.marq_after = None      # 计时链句柄
+        self.marq_name_id = None    # 名称文字项 id（画布重建后必须复位）
+        self.marq_pct_id = None     # 涨跌幅文字项 id
+        self.marq_entry = {}        # 档位秒数 -> 「轮播间隔」子菜单内项索引
+        self.menu_marq = None       # 「轮播间隔」子菜单
+        self.marquee_interval = self.load_marq_interval()
+
         # 列状态：先加载配置，菜单才能取到正确的初始勾选态
         self.col_order = list(COL_KEYS)
         self.col_hidden = set()
@@ -658,6 +742,188 @@ class Panel:
         need_hdr = bool(full and not self.folded)
         return vis, col_x, col_min_w, need_hdr
 
+    # ---------- 折叠态轮播 ----------
+    def load_marq_interval(self):
+        """读 marquee_interval 并校验：缺键按默认且不回写，有值但非法才修回。"""
+        v = self.cfg.get("marquee_interval")
+        if v is None:
+            # 缺键不写盘：load_json 在文件损坏时返回 {}，此时回写会清空用户配置
+            return MARQ_INTERVAL_DEFAULT
+        try:
+            n = int(v)
+            ok = (n == v) and n in MARQ_INTERVAL_CHOICES
+        except (TypeError, ValueError):
+            ok, n = False, 0
+        if ok:
+            return n
+        self.cfg["marquee_interval"] = MARQ_INTERVAL_DEFAULT
+        save_json(CONFIG_FILE, self.cfg)
+        log_once("marq interval repaired")
+        return MARQ_INTERVAL_DEFAULT
+
+    def marq_bounds(self):
+        """返回 (lx, rx, avail)，单位是画布坐标（= 设备像素），全程不除 s。
+
+        度量口径：Font.measure 与画布 coords 同域，但前提是进程已按
+        SetProcessDpiAwareness(2) 运行（get_scale 里做的）；否则度量落到
+        96 DPI 虚拟化空间，同一串只剩 2/3 宽，整块布局偏小。
+        """
+        if getattr(self, "_f_marq", None) is None:
+            self._f_marq = tkfont.Font(family=self.f_cn, size=MARQ_FONT_SIZE)
+            self._f_title = tkfont.Font(family=self.f_cn, size=10, weight="bold")
+            self._f_clock = tkfont.Font(family=self.f_num, size=9)
+            # 涨跌幅与列表区同口径：等宽字体（ui-rules §2.2）
+            self._f_pct = tkfont.Font(family=self.f_num, size=9, weight="bold")
+            # 渲染门槛按当前字体实测派生（两字名称 + 分隔 + 一条涨跌幅），
+            # 不写死 150% 下的像素值，DPI 100%~200% 自动跟随（ui-rules §2.8）
+            self._marq_min_w = (self._f_marq.measure("宽宽")
+                                + self._f_marq.measure(MARQ_SEP)
+                                + self._f_pct.measure("+0.00%"))
+        lx = (self.px(27) + self._f_title.measure(self.cfg.get("title", "指数君盯盘"))
+              + self.px(MARQ_GAP_L))
+        # 时钟栏可能显示 "00:00:00" 或 "连接失败"，取宽者预留
+        clock_w = max(self._f_clock.measure("00:00:00"), self._f_clock.measure("连接失败"))
+        rx = self.W - self.px(13) - clock_w - self.px(MARQ_GAP_R)
+        return lx, rx, rx - lx
+
+    def marq_fit(self, name, budget):
+        """在 budget 内截断名称：放得下原样返回，否则留一字再加省略号。"""
+        f = self._f_marq
+        if not name or budget <= 0:
+            return ""
+        if f.measure(name) <= budget:
+            return name
+        ell = f.measure(MARQ_ELLIPSIS)
+        out, w = "", 0
+        for ch in name:
+            cw = f.measure(ch)
+            if w + cw + ell > budget:
+                break
+            out += ch
+            w += cw
+        return out + MARQ_ELLIPSIS if out else ""
+
+    def clear_marq(self):
+        """删除轮播文字项并复位 id（可重复调用）。"""
+        try:
+            self.cv.delete("marq")
+        except Exception as ex:
+            self._dbg(f"marq clear 异常: {ex!r}")
+        self.marq_name_id = self.marq_pct_id = None
+
+    def draw_marq(self):
+        """绘制当前条目：名称 + 涨跌幅两个 text item（幂等，不推进会索引）。
+
+        轮播项不绑任何事件，鼠标交互全部穿透到 cv 的既有绑定。
+        """
+        try:
+            if not self.folded or not self.marq_items:
+                self.clear_marq()
+                return
+            lx, _rx, avail = self.marq_bounds()
+            if avail < self._marq_min_w:
+                # 太窄只剩半条信息，不如留空
+                self.clear_marq()
+                return
+            t = self.theme
+            code, alias = self.marq_items[self.marq_idx % len(self.marq_items)]
+            d = self.data.get(code)
+            if d is None:
+                # 停牌/未开盘/解析失败都不写入 data，"无 key"是唯一缺失形态
+                name, pct_text, color = alias or code, MARQ_EMPTY, t["flat"]
+            else:
+                pct = d["pct"]
+                name = alias or d["name"] or code
+                pct_text = f"{pct:+.2f}%"
+                color = t["up"] if pct > 0 else (t["down"] if pct < 0 else t["flat"])
+            f = self._f_marq
+            name = self.marq_fit(name,
+                                 avail - f.measure(MARQ_SEP) - self._f_pct.measure(pct_text))
+            y = self.head_h / 2
+            if self.marq_name_id is None:
+                self.marq_name_id = self.cv.create_text(
+                    lx, y, anchor="w", text=name, fill=t["text"],
+                    font=(self.f_cn, MARQ_FONT_SIZE), tags="marq")
+            else:
+                self.cv.itemconfigure(self.marq_name_id, text=name, fill=t["text"])
+                self.cv.coords(self.marq_name_id, lx, y)
+            x2 = lx + f.measure(name) + f.measure(MARQ_SEP)
+            if self.marq_pct_id is None:
+                self.marq_pct_id = self.cv.create_text(
+                    x2, y, anchor="w", text=pct_text, fill=color,
+                    font=(self.f_num, 9, "bold"), tags="marq")
+            else:
+                self.cv.itemconfigure(self.marq_pct_id, text=pct_text, fill=color)
+                self.cv.coords(self.marq_pct_id, x2, y)
+        except Exception as ex:
+            self._dbg(f"marq 异常: {ex!r}")
+
+    def marq_cancel(self):
+        """取消挂起的计时链。
+
+        首行必须判空：after_cancel(None) 抛 ValueError（实测），从 build 的
+        finally 里穿出去会中断后续绘制。
+        """
+        if self.marq_after is None:
+            return
+        try:
+            self.root.after_cancel(self.marq_after)
+        except Exception as ex:
+            self._dbg(f"marq cancel 异常: {ex!r}")
+        self.marq_after = None
+
+    def marq_schedule(self, restart=False):
+        """排下一次换条；默认不打断进行中的计时（只有折叠建单与改档才 restart）。"""
+        if restart:
+            self.marq_cancel()
+        if self.marq_after is not None:
+            return
+        if not self.folded or not self.marq_items:
+            return
+        if self.marq_bounds()[2] < self._marq_min_w:
+            return          # 超窄不排链，变宽时由 _resize_live 折叠分支补排
+        try:
+            self.marq_after = self.root.after(self.marquee_interval * 1000, self.marq_next)
+        except Exception as ex:
+            self._dbg(f"marq schedule 异常: {ex!r}")
+
+    def marq_next(self):
+        """换下一条：清句柄 -> 推进索引 -> 重绘 -> 再排。异常也要继续排。"""
+        self.marq_after = None
+        try:
+            n = len(self.marq_items)
+            if n:
+                self.marq_idx = (self.marq_idx + 1) % n
+            self.draw_marq()
+        except Exception as ex:
+            self._dbg(f"marq next 异常: {ex!r}")
+        finally:
+            self.marq_schedule()
+
+    def set_marq_interval(self, v):
+        """切换档位：重排计时（当前条目不跳），落盘，刷新菜单对勾。"""
+        if v not in MARQ_INTERVAL_CHOICES:
+            return
+        self.marquee_interval = v
+        self.marq_schedule(restart=True)
+        self.cfg["marquee_interval"] = v
+        save_json(CONFIG_FILE, self.cfg)      # 内部吞异常，失败静默（与 alpha 等一致）
+        self._refresh_marq_menu()
+
+    def _refresh_marq_menu(self):
+        """按当前档位刷新「轮播间隔」4 项的对勾位图。"""
+        mm = getattr(self, "menu_marq", None)
+        if mm is None:
+            return
+        for sec, idx in getattr(self, "marq_entry", {}).items():
+            try:
+                mm.entryconfigure(idx,
+                                  image=self.img_chk_on if sec == self.marquee_interval
+                                  else self.img_chk_off,
+                                  compound="left")
+            except Exception as ex:
+                self._dbg(f"marq menu 刷新异常: {ex!r}")
+
     # ---------- 右键菜单 ----------
     def _mk_check_imgs(self):
         """生成菜单用的白色对勾 / 全透明占位图（16x16）。
@@ -731,6 +997,22 @@ class Panel:
                            command=lambda key=k: self.toggle_column(key))
             self.col_entry[k] = cm.index("end")
         m.add_cascade(label="显示列", menu=cm)
+
+        # 轮播间隔：同一套白色对勾位图。索引必须从子菜单对象取
+        # （mm.index("end")），取父菜单会指到别的项上。
+        mm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
+                     activebackground="#3B4A63", activeforeground="#FFFFFF",
+                     font=(self.f_cn, 9))
+        self.menu_marq = mm
+        self.marq_entry = {}
+        for sec in MARQ_INTERVAL_CHOICES:
+            on = sec == self.marquee_interval
+            mm.add_command(label=f"{sec} 秒",
+                           image=self.img_chk_on if on else self.img_chk_off,
+                           compound="left",
+                           command=lambda s=sec: self.set_marq_interval(s))
+            self.marq_entry[sec] = mm.index("end")
+        m.add_cascade(label="轮播间隔", menu=mm)
 
         op = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
                      activebackground="#3B4A63", activeforeground="#FFFFFF",
@@ -823,6 +1105,10 @@ class Panel:
         self.cc_top = self.head_h + (self.px(HDR_H) if self.need_hdr else 0)
 
         self.cv.delete("all")
+        # 新画布的 item id 从 1 重新计数，旧 id 很可能正好指向标题/时钟/圆角；
+        # 而 Tk 对失效或错指向 id 的 itemconfigure / coords 不报错，会静默改错
+        # 元素（轮播文字盖住标题、圆角被挪位）。两个分支都要复位。
+        self.marq_name_id = self.marq_pct_id = None
         self.cv.configure(width=self.W, height=self.H, bg=KEY)
         self.rows.clear()
         self.hit.clear()
@@ -849,9 +1135,25 @@ class Panel:
         self._bind_canvas(self.cv)
 
         if self.folded:
+            # 清单只在"刚折叠"这一条边沿重建：折叠态内保存自选/缩放松手/
+            # 重载配置都会再走 build，那时清单与索引必须原样保留
+            if self.marq_dirty or not self.marq_items:
+                self.marq_items = marq_list(cfg)
+                self.marq_idx = 0
+                self.marq_dirty = False
+            self.draw_marq()          # 必须在 _draw_masks 之前，否则残角露出
             self._draw_masks()
             self.apply_geometry()
+            # 不用 restart：折叠边沿已先 marq_cancel，句柄为空自然会排链；
+            # 折叠态内的其他重建（缩放松手/保存自选/重载配置）不打断进行中的计时
+            self.marq_schedule()
             return
+
+        # 展开态：轮播停止，清单与索引归零（再折叠时从首条开始）
+        self.clear_marq()
+        self.marq_items = []
+        self.marq_idx = 0
+        self.marq_cancel()
 
         # 内容画布：固定视口，内容超高时滚动
         # 右侧预留 SB_W 宽的条带给滚动条——内容画布是真实子窗口，
@@ -1167,6 +1469,10 @@ class Panel:
         if self.err:
             self.cv.itemconfig(self.clock, text="连接失败", fill=t["up"])
 
+        if self.folded:
+            # 行情到货即时跟上（rows 为空，上面的循环在折叠态是空转）
+            self.draw_marq()
+
     def paint_ind(self):
         """只刷行业列：行业数据独立到货，不必整表重画。
 
@@ -1222,6 +1528,9 @@ class Panel:
                 else:
                     self.cv.itemconfig(self.clock, text=datetime.now().strftime("%H:%M:%S"),
                                        fill=self.theme["sub"])
+                if self.folded:
+                    # 只跟新数值：不推进索引、不重排计时（换条靠独立 after 链）
+                    self.draw_marq()
             except Exception:
                 pass
             self.root.after(1000, self._tick)
@@ -1379,6 +1688,10 @@ class Panel:
         if "n" in self._rdir:
             h = max(minh, self._rh - dy)
             y = self._ry + (self._rh - h)
+        if self.folded:
+            # 折叠态纵向不可缩放：minh = px(MIN_H) = 144 远大于标题栏 51，
+            # 一拖上下边框就会撑出 93px 空白区（静默错，不报错）。纵向视为无操作。
+            h, y = self.head_h, self._ry
         self.W, self.H = int(w), int(h)
         self._last_pos = (int(x), int(y))
         self.root.geometry(f"{self.W}x{self.H}+{int(x)}+{int(y)}")
@@ -1423,6 +1736,16 @@ class Panel:
         不在这里处理：那要增删列文字，交给松手后的 _rebuild。
         """
         try:
+            if self.folded:
+                # 折叠态只有标题栏一条：不碰列体系与内容画布，只把时钟和轮播
+                # 按新宽度重排。宽度变化直接决定名称截断位置。
+                self.H = self.head_h
+                self.cv.coords(self.clock, self.W - self.px(13), self.head_h / 2)
+                self.draw_marq()
+                self._draw_body()
+                self._draw_masks()
+                self.marq_schedule()      # 从超窄拖宽后恢复轮播（句柄空才排）
+                return
             if self.vis_h != self.H - self.head_h:
                 self.vis_h = max(self.row_h, self.H - self.head_h)
             enabled = self.enabled_cols()
@@ -1519,6 +1842,7 @@ class Panel:
     def on_menu(self, e):
         self.var_top.set(bool(self.root.attributes("-topmost")))
         self._refresh_col_menu()      # 每次弹出前对齐 ✓ 与实际显示列
+        self._refresh_marq_menu()     # 轮播档位同理
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1548,6 +1872,13 @@ class Panel:
 
     def toggle_fold(self):
         self.folded = not self.folded
+        self.marq_cancel()
+        if self.folded:
+            # 折叠边沿：这是清单重建的唯一入口，其他 _rebuild 路径不动清单
+            self.marq_dirty = True
+        else:
+            self.marq_items = []
+            self.marq_idx = 0
         self._rebuild()
 
     def reset_size(self):
@@ -1585,10 +1916,13 @@ class Panel:
         self.cfg = load_json(CONFIG_FILE, self.cfg)
         self.theme = THEMES.get(self.cfg.get("theme", "dark"), THEMES["dark"])
         self.set_alpha(float(self.cfg.get("alpha", self.alpha)))
+        # 档位也要重读，否则"编辑配置文件 -> 重新加载"对它不生效
+        self.marquee_interval = self.load_marq_interval()
         self._rebuild()
         # 主题可能变了：菜单颜色与对勾位图要按新主题重画（_build_menu
         # 会顺带重建 img_chk_*，旧菜单对象整体替换，无引用残留）
         self.menu = self._build_menu()
+        self._refresh_marq_menu()
         self.wake.set()
 
     # ---------- 开机自启 ----------
@@ -2196,6 +2530,7 @@ def selftest():
         folded = False
         def px(self, v): return int(round(v * _S.s))
         def _need_width(self, cols): return Panel._need_width(self, cols)
+        def _layout_of(self, vis, w): return Panel._layout_of(self, vis, w)
         def compute_columns(self, w, en): return Panel.compute_columns(self, w, en)
     st = _S()
     print(f"[cols  ] 缩放 {st.s:.2f}  六列需宽 {st._need_width(COL_KEYS) / st.s:.0f}"
@@ -2203,6 +2538,39 @@ def selftest():
     for w in (420, 312, 180, 150):
         vis, _cx, _mn, hdr = st.compute_columns(st.px(w), list(COL_KEYS))
         print(f"         W={w:>4} → {'/'.join(vis)}  表头={'显示' if hdr else '隐藏'}")
+
+    # 折叠态轮播：清单来源、指数判定、标题栏可用区
+    lst = marq_list(cfg)
+    print(f"[marq  ] 清单 {len(lst)} 条: "
+          + (", ".join(f"{a or c}({c})" for c, a in lst) or "(空，轮播区留空)"))
+    for c, want in (("sh000001", True), ("sz399001", True), ("sh510500", False),
+                    ("sz159865", False), ("hkHSTECH", True)):
+        got = is_index_like(c)
+        print(f"         {c:<11} 指数类={str(got):<5} 预期={str(want):<5}"
+              f" {'OK' if got == want else '!! 不符'}")
+
+    # 可用区与截断一律调 Panel 自己的方法，不在这里另写一份坐标公式
+    root = tk.Tk()
+    root.withdraw()
+
+    class _M:
+        pass
+
+    m = _M()
+    m.s = get_scale()
+    m.cfg = cfg
+    m.f_cn = pick_family(root, "Microsoft YaHei UI", "Microsoft YaHei", "SimHei")
+    m.f_num = pick_family(root, "Consolas", "Cascadia Mono", "Courier New")
+    m.px = lambda v: int(round(v * m.s))
+    m.W = m.px(int(cfg.get("width", 268)))
+    m.head_h = m.px(34)
+    lx, rx, avail = Panel.marq_bounds(m)
+    print(f"[marq  ] 缩放 {m.s:.2f}  W={m.W}  lx={lx:.0f}  rx={rx:.0f}  avail={avail:.0f}"
+          f"（门槛 {m._marq_min_w:.0f}）→ {'渲染' if avail >= m._marq_min_w else '留空'}")
+    for nm in ("上证指数", "创业板指", "中证A500"):
+        budget = avail - m._f_marq.measure(MARQ_SEP) - m._f_marq.measure("+0.01%")
+        print(f"         名称预算 {budget:.0f}: {nm} → {Panel.marq_fit(m, nm, budget)}")
+    root.destroy()
 
     # 行业：只报告可用性，失败不影响退出码
     indie = [c for c in codes if need_industry(c)]
