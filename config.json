@@ -5,7 +5,7 @@
   "topmost": true,
   "trading_refresh": 5,
   "idle_refresh": 60,
-  "width": 358,
+  "width": 333,
   "max_height": 460,
   "groups": [
     {
@@ -49,10 +49,6 @@
           "alias": "皇台酒业"
         },
         {
-          "code": "sz002517",
-          "alias": "恺英网络"
-        },
-        {
           "code": "sh601375",
           "alias": "中原证券"
         },
@@ -77,16 +73,44 @@
           "alias": "红利ETF西部利得"
         },
         {
-          "code": "sh510910",
-          "alias": "上证指数ETF南方"
-        },
-        {
           "code": "sh515120",
           "alias": "创新药ETF广发"
         },
         {
+          "code": "sh600216",
+          "alias": "浙江医药"
+        },
+        {
+          "code": "sh510910",
+          "alias": "上证指数ETF南方"
+        },
+        {
+          "code": "sh513330",
+          "alias": "恒生互联网ETF华夏"
+        },
+        {
+          "code": "sh512690",
+          "alias": "酒ETF鹏华"
+        },
+        {
+          "code": "sz002517",
+          "alias": "恺英网络"
+        },
+        {
           "code": "sz300750",
           "alias": "宁德时代"
+        },
+        {
+          "code": "sh512100",
+          "alias": "中证1000ETF南方"
+        },
+        {
+          "code": "sh510500",
+          "alias": "中证500ETF南方"
+        },
+        {
+          "code": "sz159531",
+          "alias": "中证2000ETF南方"
         }
       ]
     }
@@ -101,8 +125,10 @@
       "industry"
     ],
     "hidden": [
-      "industry"
+      "industry",
+      "turnover"
     ]
   },
-  "height": 565
+  "height": 565,
+  "marquee_interval": 2
 }
