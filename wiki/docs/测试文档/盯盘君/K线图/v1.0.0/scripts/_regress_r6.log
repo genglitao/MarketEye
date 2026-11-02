@@ -1,0 +1,64 @@
+bgerror failed to handle background error.
+    Original error: invalid command name "1675814438016poll"
+    Error in bgerror: can't invoke "tk" command: application has been destroyed
+bgerror failed to handle background error.
+    Original error: invalid command name "1675814538304_tick"
+    Error in bgerror: can't invoke "tk" command: application has been destroyed
+====================================================================
+TC-R-03  config 兼容：无 kline 键 / ma 缺键 / h 过小（回归，T001/T020）
+====================================================================
+  [PASS] 无 kline 键 → 全默认  <- day
+  [PASS] h<480 钳制 480  <- 480
+  [PASS] ma 缺键补 true  <- {'ma5': True, 'ma10': True, 'ma20': True, 'ma60': True, 'ma120': True, 'ma250': True}
+  [PASS] 非法周期回退 day  <- day
+  [PASS] 非法复权回退 qfq  <- qfq
+  [PASS] 旧配置启动正常
+  [PASS] 保存后 groups 仍在
+  [PASS] 保存后 kline 键生成
+====================================================================
+TC-R-01  主面板手势回归（折叠/展开/标题拖动/行拖动）
+====================================================================
+  [PASS] 双击标题栏折叠/展开
+  [PASS] 标题栏拖动移动窗口  <- ({'x': 260, 'y': 110}, {'x': 340, 'y': 150})
+  [PASS] 行拖动移动窗口且不开 K 线
+    截图 screenshots/TC-R-01-step1-20261102104328-2.png  手势回归
+====================================================================
+TC-R-02  主面板行情渲染回归（列文本与配色）
+====================================================================
+  [PASS] 名称列渲染
+  [PASS] 价格列渲染  <- ['10.00', '10.00', '10.00', '10.00', '10.00']
+  [PASS] 涨跌幅列渲染
+  [PASS] 涨红跌绿配色生效
+    截图 screenshots/TC-R-02-step1-20261102104329-9.png  行情渲染
+====================================================================
+TC-R-04  selftest 全绿（回归）
+====================================================================
+  [PASS] selftest 退出码 0
+  [PASS] 自检含标的统计  <-   sh563180     —
+10-04', '2026-10-07'] OK
+[kline ] 回溯去重 完整串键 → 8 根/1 日 OK
+[kline ] minute_axis 沪深 242 港股 332 OK
+[kline ] calc_macd 首根EMA/两点手算(280·56·448/351)/常序列归零/等长 OK
+[draw  ] 黄金分割7档/波浪尺4档+回撤60%/seg_dist退化/stack_labels/fg_on/norm_rec容错/group_key OK
+[ind   ] 19/19 条，用时 0.15s
+  sh601658     国有银行
+  sz159865     —
+  sh515120     —
+  sh601336     保险
+  sz159611     —
+  sz159708     —
+  sh601375     证券
+  sh510510     —
+  sz159633     —
+  sz159531     —
+  sh512880     —
+  sh600216     化学原料药
+  sz000995     白酒
+  sh510910     —
+  sh513330     —
+  sh512690     —
+  sz002517     游戏娱乐
+  sz300750     储能设备
+  sh563180     —
+
+TC-UI-regress 完成

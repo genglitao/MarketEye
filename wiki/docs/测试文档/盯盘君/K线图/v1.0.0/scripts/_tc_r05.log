@@ -1,0 +1,7 @@
+  [PASS] save_json 首次写返回 True  <- True
+  [PASS] save_json 改写返回 True（.bak 生成）  <- True
+  [PASS] save_json 非法路径返回 False 且不抛异常  <- False
+  [PASS] save_drawings 透传布尔（成功 True）  <- True
+  [PASS] save_drawings 失败透传 False（不抛异常）  <- False
+  [PASS] selftest 退出码 0（既有调用点行为不变旁证）  <- rc=0
+TC-R-05 完成：6 PASS / 0 FAIL
