@@ -1,4 +1,4 @@
-# 指数君盯盘
+# 盯盘君
 
 一个常驻桌面的实时行情悬浮小窗。置顶、半透明、圆角、可拖动，只显示你自己关注的标的。
 
@@ -117,6 +117,46 @@ python ticker.pyw --selftest
 因为要支持自由缩放，只能彻底弃用 `SetWindowRgn`。副作用是内容画布（`cc`）底部
 让出了一个圆角高度的条带（`vis_cc = vis_h - 圆角半径`），这几像素的可见内容略少，
 换来的是缩放后完全正常的绘制。
+
+## 实现备注：K 线窗口首帧布局与尺寸记忆
+
+K 线窗口的记忆尺寸存在 `config.json` 的 `kline.w/h`（逻辑像素）。踩过一个坑：
+Tk 在窗口**映射前** `winfo_width/height` 恒为 1，早先的布局兜底写死默认 880×640，
+于是当记忆高度不是 640（比如旧版记忆的 560）时，副图区 `vol_y1/tm_y` 按偏大的
+假想高度算，量副图和 MACD 副图整体下移被窗口底边裁掉——**表现就是"一打开副图不全，
+随便拉一下大小就好了"**（缩放触发 `<Configure>` 重算 + 重绘）。
+
+现在两条保证：
+
+1. `__init__` 记下本次请求的客户区尺寸 `_req_w/_req_h`，映射前兜底用它（高度扣掉工具条 `KLINE_TB_H`）；
+2. `_sync_layout()` 在每次 `draw_all` 前对账画布真实尺寸，与缓存不一致就先重算，
+   覆盖"数据比最终 `<Configure>` 先到"的时序。
+
+一般不变量：`main_y1 < vol_y1 < tm_y ≤ 画布高`；改布局代码后可用
+`.workbuddy/tc_kline_openfit.py` 回归（记忆 880×560 开窗，6 项断言）。
+
+## 实现备注：数据文件隔离与写盘留底
+
+程序的数据文件（`config.json` / `position.json` / `industry_cache.json` / `amount_base.json`）
+路径都基于 `BASE`：
+
+```
+BASE = os.environ.get("MARKETWIDGET_BASE") or <ticker.pyw 所在目录>
+```
+
+**写测试脚本时必须隔离**：脚本 import 真模块后，任何「保存」动作都会落到真实文件上。
+2026-10-30 就出过一次事故——回归脚本用只含 `kline` 的测试桩 cfg，`KlineWin.close()` 把
+真实 `config.json` 整份覆盖，自选分组全丢。现在测试统一这么写：
+
+```python
+import os, tempfile
+os.environ["MARKETWIDGET_BASE"] = tempfile.mkdtemp(prefix="mw_test_")
+```
+
+另外两条兜底：
+
+- `save_json()` 覆盖前先把旧文件复制成 `*.bak`，整份覆盖类事故可人工回滚；
+- `save_kline_state()` 只负责 `kline` 键，传入 cfg 缺 `groups` 时先并回磁盘上的其它键。
 
 ## 开发流程（SDLC）
 
