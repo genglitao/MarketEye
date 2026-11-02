@@ -10,7 +10,7 @@
 | 文档版本 | v1.0.0 |
 | 版本状态 | 未发布 |
 | 创建日期 | 2026-10-19 |
-| 更新日期 | 2026-10-19 |
+| 更新日期 | 2026-10-30 |
 | 基于需求 | [PRD-盯盘君-自定义列-v1.0.0](../需求文档/自定义列/v1.0.0/PRD-盯盘君-自定义列-v1.0.0.md)，对应 PRD 文档版本 **v1.0.1**（含 F-11 固定表头与 AC-40~AC-48） |
 | 基于原型 | [PROTO-盯盘君-自定义列-v1.0.0](../需求文档/自定义列/v1.0.0/PROTO-盯盘君-自定义列-v1.0.0.html) |
 | 基于设计 | —（本功能为首个进入 SDLC 流程的设计，无旧版 SDD） |
@@ -19,7 +19,7 @@
 
 | 版本 | 日期 | 变更人 | 变更类型 | 关联章节 | 变更内容 |
 | --- | --- | --- | --- | --- | --- |
-| v1.0.0 | 2026-10-19 | - | 新增 | §1.1–§10 | 首版设计，覆盖 PRD v1.0.1 全部 F-01~F-11。**列与布局**：列键枚举与列宽表（价格 82 / 涨跌幅 64 / 量比 44 / 换手 52 / 行业 56，逻辑像素）、`col_x` / `col_min_w` 算法（六列 420，`CW = W − SB_W`，名称列取 `max(60, 余量)`）、**固定表头**画在 `cv` 固定条带并与数据区共用同一份 `col_x`、降级隐藏 `HIDE_ORDER`、`MIN_H` 96（= 34+25+16+18，取 96 使 `px()` 在各缩放档下均为整数）。**数据与接口**：`f[38]` 换手率 / `f[49]` 量比解析，`quote_kind()` 按品种分流（港股 78 字段、指数不取值）、占位口径（`—` 字段无数据 / `--` 整行无行情）与行内列色判定表、东方财富行业接口（按 `secids` 顺序逐位映射，不反查 `f12`/`f13`，长度不等整批丢弃）、7 天缓存与后台线程、`self.ind` 由 UI 线程 `poll` 唯一写入、北交所本版不请求行业。**交互**：扩宽开关 `_widen_ok` 单次消费语义、右键「显示列」子菜单（对勾用主题色 `PhotoImage` + `compound="left"`，弹出前按 `col_hidden` 重刷；不用 `checkbutton` 与文本符号 `√`/`✓`——勾选标记默认黑色、符号字符在 label 中被按暗色渲染，深色菜单上均不可见）、拖动缩放中绝不 `_rebuild`（列集合变化沿用旧列重排，松手后统一降级）、管理面板「列」页签（两套控件一次创建、只隐藏不销毁）、表头与菜单两套文案。**交付**：T001~T017 任务清单 |
+| v1.0.0 | 2026-10-19 | - | 新增 | §1.1–§10 | 首版设计，覆盖 PRD v1.0.1 全部 F-01~F-11。**列与布局**：列键枚举与列宽表（价格 82 / 涨跌幅 64 / 量比 44 / 换手 52 / 行业 56，逻辑像素）、`col_x` / `col_min_w` 算法（六列 420，`CW = W − SB_W`，名称列取 `max(60, 余量)`）、**固定表头**画在 `cv` 固定条带并与数据区共用同一份 `col_x`、降级隐藏 `HIDE_ORDER`、`MIN_H` 96（= 34+25+16+18，取 96 使 `px()` 在各缩放档下均为整数）。**数据与接口**：`f[38]` 换手率 / `f[49]` 量比解析，`quote_kind()` 按品种分流（港股 78 字段、指数不取值）、占位口径（`—` 字段无数据 / `--` 整行无行情）与行内列色判定表、东方财富行业接口（按 `secids` 顺序逐位映射，不反查 `f12`/`f13`，长度不等整批丢弃）、7 天缓存与后台线程、`self.ind` 由 UI 线程 `poll` 唯一写入、北交所本版不请求行业。**交互**：扩宽开关 `_widen_ok` 单次消费语义、右键「显示列」子菜单（对勾用主题色 `PhotoImage` + `compound="left"`，弹出前按 `col_hidden` 重刷；不用 `checkbutton` 与文本符号 `√`/`✓`——勾选标记默认黑色、符号字符在 label 中被按暗色渲染，深色菜单上均不可见）、拖动缩放中绝不 `_rebuild`（列集合变化沿用旧列重排，松手后统一降级）、管理面板「列」页签（两套控件一次创建、只隐藏不销毁）、表头与菜单两套文案。**交付**：T001~T017 任务清单；**行业数据源迁移（2026-10-30 同版本合并）**： `push2.eastmoney.com` 报价集群整域断连（与 K 线 `push2his` 同因，K 线已迁腾讯），行业接口改走 `datacenter-web.eastmoney.com` 的 `RPT_F10_BASIC_ORGINFO`（实测可达）：`SECURITY_CODE` 批量 `IN` 过滤、按代码回填（顺序无关，取消旧版「逐位映射 + 长度不等整批丢弃」约束）、`EM2016` 三级行业名取末段入列；T003/T004 重写，港股与北交所行业列为编码期实测项 |
 
 ### 1.3 技术选型
 
@@ -28,7 +28,7 @@
 | 语言版本 | Python 3.8+ | 只用标准库，不引入任何第三方包（详见 [coding-rules.md §5](../rules/coding-rules.md)） |
 | GUI 框架 | tkinter 8.6（Tk Canvas 自绘） | 列表区全部由 Canvas `create_text` 绘制，不使用 ttk 控件 |
 | 行情数据源 | 腾讯行情 `https://qt.gtimg.cn/q=` | 沿用现有接口，新增读取 `f[38]` 换手率、`f[49]` 量比两个字段 |
-| 行业数据源 | 东方财富 `https://push2.eastmoney.com/api/qt/ulist.np/get` | **本次新增的唯一外部接口**，批量取 `f100` 行业名 |
+| 行业数据源 | 东方财富 `https://datacenter-web.eastmoney.com/api/data/v1/get`（`RPT_F10_BASIC_ORGINFO`） | 原 `push2` 报价集群的 `ulist.np` 于 2026-10-30 实测整域断连；`datacenter-web` 通道实测可达，批量取 `EM2016` 三级行业名（详见 §3.2.2） |
 | 配置存储 | `config.json`（`json` 模块读写） | 新增 `columns` 节点；读取失败回落默认值 |
 | 缓存存储 | `industry_cache.json`（新增文件） | 行业名本地缓存，有效期 7 天；写入失败不影响主流程 |
 | 网络 | `urllib.request` + `threading.Thread` + `queue.Queue` | 与现有行情线程同构，UI 线程不阻塞 |
@@ -287,55 +287,53 @@ classDiagram
 | `f[38]`/`f[49]` 为空串、非数字、负值 | 无效值 | 该单元格 `—` |
 | 解码乱码 | GBK 解不出 | `errors="ignore"` 丢弃坏字节，名称可能缺字但不断言失败 |
 
-#### 3.2.2 东方财富行业接口（新增）
+#### 3.2.2 东方财富行业接口（2026-10-30 迁移至 datacenter-web）
 
 | 项 | 内容 |
 | --- | --- |
-| 地址 | `https://push2.eastmoney.com/api/qt/ulist.np/get` |
+| 地址 | `https://datacenter-web.eastmoney.com/api/data/v1/get` |
 | 方式 | GET |
-| 查询参数 | `fltt=2`、`fields=f12,f13,f14,f100`、`secids={市场}.{代码},...` |
+| 查询参数 | `reportName=RPT_F10_BASIC_ORGINFO`、`columns=SECURITY_CODE,EM2016`、`filter=(SECURITY_CODE in ("600519","002594",...))`（filter 值整体 URL 转义）、`pageSize=200` |
 | 请求头 | `User-Agent: Mozilla/5.0 ...`、`Referer: https://quote.eastmoney.com/` |
 | 超时 | 6 秒 |
 | 编码 | **UTF-8**（与腾讯接口不同，不可混用解码方式） |
-| 返回格式 | JSON，`data.diff` 为数组 |
+| 返回格式 | JSON，`result.data` 为数组；`result` 为 null 表示无命中（按失败处理，见异常表） |
 
-**`secids` 的拼装规则**（腾讯代码 → 东财市场号）：
+> **迁移原因（2026-10-30 实测）**：原 `push2.eastmoney.com/api/qt/ulist.np/get` 所在报价集群整域断连（`push2his` 同因迫使 K 线迁腾讯，见 K 线 SDD §10.2）；`datacenter-web` 通道实测可达，`RPT_F10_BASIC_ORGINFO` 支持 `SECURITY_CODE` 批量 `IN` 过滤，`EM2016` 字段返回东财行业三级名。**行业列的列宽（56 逻辑像素）、降级隐藏顺序、7 天缓存、后台线程与 `self.ind` 单一写入点全部不变。**
 
-| 腾讯前缀 | 东财市场号 | `secids` 片段 | 适用 | 验证状态 |
-| --- | --- | --- | --- | --- |
-| `sh` | `1` | `1.{6位代码}` | 沪市个股、沪市 ETF | **实测通过**（`1.600519` → 白酒Ⅱ） |
-| `sz` | `0` | `0.{6位代码}` | 深市个股、深市 ETF | **实测通过**（`0.300750` → 电池） |
-| `hk` | `116` | `116.{5位代码}` | 港股个股 | **实测通过**（`116.00700` → 软件服务） |
-| `bj` | — | **本版不请求** | 北交所个股 | **不做推测映射**：北交所的东财市场号未经实测确认，若按 `0` 拼（与深市同号）则依赖东财自己按代码段区分，无法验证；为免"看起来有行业、实际是别的票"这类静默错值，`to_secid("bj...")` 一律返回 `None`，行业列显示 `—`，其余列与行情完全正常。后续如确需支持，须先实测拿到可验证的市场号再开 |
-| 指数（`sh000xxx`、`sz399xxx`、`hk*` 指数） | — | **不请求** | 指数无行业归属 | 设计约定 |
+**代码映射规则**（腾讯代码 → 6 位证券代码）：
+
+| 腾讯前缀 | `to_secucode` 片段 | 适用 | 验证状态 |
+| --- | --- | --- | --- |
+| `sh` / `sz` | `code[2:]`（6 位数字） | 沪深个股 | **实测通过**（600519→食品饮料-饮料-白酒、300750→电气设备-电源设备-储能设备、002594→交运设备-汽车-乘用车） |
+| `hk` | `code[2:]`（5 位数字） | 港股个股 | **待编码期实测**：该报表是否含港股未验证；无值则行业列 `—`（与旧版一致，不影响其余列） |
+| `bj` | — | **本版不请求** | 编码期对 `430047` 试查一次并登记结论；有值则放开、无值维持 `—`（不推测、不静默错值，沿用旧版原则） |
+| 指数（`sh000xxx`、`sz399xxx`、`hk*` 指数） | — | **不请求** | 指数无行业归属 |
+| ETF（如 `sh510300`） | `code[2:]` | 请求但该报表无命中 | 实测 `510300` 不在返回中 → 按「已确认无行业」缓存 `""` |
 
 > **指数与港股个股的区分不要复用 `is_index_code`**：现有 `is_index_code()` 的语义是"打开浏览器时用 `zs` 还是 `gp` 页面"，它把所有 `hk*` 都判为指数，会把港股个股也挡掉。行业请求的判定统一走 `need_industry(code)`，其规则见 §3.4.4。
 
-**API 响应示例**（`ulist.np` 实测原始返回，仅保留 `f100` 相关字段）：
+**行业名取值口径**：`EM2016` 为「一级-二级-三级」串（如 `食品饮料-饮料-白酒`），**取末段**入列（`白酒` / `乘用车` / `储能设备`），56 逻辑像素列宽与 `trunc()` 规则不变；无 `-` 时全串取用。
+
+**API 响应示例**（实测原始结构，仅保留相关字段）：
 
 ```json
-{"rc":0,"data":{"total":5,"diff":[
-  {"f12":"600519","f13":1,"f14":"贵州茅台","f100":"白酒Ⅱ"},
-  {"f12":"300750","f13":0,"f14":"宁德时代","f100":"电池"},
-  {"f12":"00700","f13":116,"f14":"腾讯控股","f100":"软件服务"},
-  {"f12":"510300","f13":1,"f14":"沪深300ETF华泰柏瑞","f100":""}
-]}}
+{"result":{"pages":1,"data":[{"SECURITY_CODE":"600519","EM2016":"食品饮料-饮料-白酒"},{"SECURITY_CODE":"300750","EM2016":"电气设备-电源设备-储能设备"}],"count":3},"success":true,"message":"ok","code":0}
 ```
 
-> **`f12`/`f13` 不做反查**：响应里虽带 `f12`（代码）与 `f13`（市场号），但它们与原请求的 `secids` 顺序**不保证一一对应**（东财可能丢弃未命中的代码）。因此解析时**不使用** `f12`+`f13` 拼回腾讯代码，而是依赖「一个请求批次内的 `secids` 顺序 ↔ `diff` 顺序」逐位映射；若 `diff` 长度与请求数量不等，则该批**整批丢弃**（返回 `None`），宁可不显示行业也不串行。这一约定同时写进 §3.2.2 的错误处理（`rc≠0`、长度不等、超时、解码失败 → 全部视为失败）。
+> **按 `SECURITY_CODE` 回填，顺序无关**：请求前先建「6 位码 → 腾讯全码」字典，解析时逐条按 `SECURITY_CODE` 回填。旧版「`diff` 顺序逐位映射 + 长度不等整批丢弃」的约束**随接口迁移一并取消**——该约束源于 push2 顺序映射不可验证；新接口自带代码字段，天然免疫乱序与缺失。
 
 **异常处理**：
 
 | 场景 | 处理 |
 | --- | --- |
-| `rc != 0` 或 `data` 为 null | 本次放弃，保留旧缓存；无缓存则全部 `—` |
-| `diff` 为空 | 同上报错处理（不逐标的记为"无行业"，避免把一次失败写成 7 天缓存） |
-| `len(diff) != len(本批 secids)` | **整批丢弃**（返回 `None`），不按位置猜映射；理由见上「`f12`/`f13` 不做反查」 |
-| 某标的 `f100` 为空串 | 视为"该标的无行业"，写入缓存（值 `""`）。ETF 属常见情况，实测 `510300` 的 `f100` 即空串 |
+| `code != 0` 或 `result` 为 null | 本次放弃，保留旧缓存；无缓存则全部 `—` |
+| `result.data` 为空数组 | 同上（不逐标的记为"无行业"，避免把一次失败写成 7 天缓存） |
+| 某标的不在返回中（请求成功但无命中） | 视为"该标的无行业/无 F10"，写入缓存（值 `""`）。ETF 属常见情况，实测 `510300` 即无返回 |
 | 超时 / 断网 | 单次失败后**不重试**，等下次启动或缓存过期 |
-| 请求标的多于 100 个 | 按 80 个一批分次请求，批间不 sleep（当前自选量远小于此，仅作保护） |
+| 请求标的多于 100 个 | 按 80 个一批分次请求（`pageSize=200` 可容纳单批），批间不 sleep（当前自选量远小于此，仅作保护） |
 
-> `f100` 为空串与「该标的在 `diff` 中缺失」是**两种语义**：前者是东财明确回了该标的但无行业（写入缓存 `""`，7 天内不再问）；后者意味着无法确定映射关系，已被上面的「整批丢弃」规则拦掉，不会走到逐标的写缓存这一步。
+> 「不在返回中」与「请求失败」是**两种语义**：前者是东财明确成功应答但该标的无 F10 记录（写入缓存 `""`，7 天内不再问）；后者整批放弃、不写任何缓存，不会把一次网络失败固化成 7 天空值。
 
 ### 3.3 业务流程
 
@@ -432,13 +430,13 @@ sequenceDiagram
         C-->>P: 直接用，发请求步骤整体跳过
     else 过期 / 无缓存 / 文件损坏
         P->>P: 先 q.put(("ind", 旧值))，行业列随即显示旧值或 "—"
-        P->>E: GET ulist.np（非指数标的）
+        P->>E: GET datacenter RPT_F10（非指数标的）
         alt 成功
-            E-->>P: diff → {code: f100}（按 secids 顺序逐位映射）
+            E-->>P: data → {code: 行业}（按 SECURITY_CODE 回填）
             P->>C: 写 stamp + items（后台线程内直接落盘）
             P->>P: q.put(("ind", 新值)) → poll 写 self.ind 并重画行业列
         else 失败
-            E-->>P: 超时 / rc≠0 / 长度不等
+            E-->>P: 超时 / rc≠0 / data 空
             Note over P: 保留旧缓存值<br/>无缓存则 "—"<br/>不重试
         end
     end
@@ -548,7 +546,7 @@ sequenceDiagram
 | 连接失败时全列 `--` | 现有 `paint` 里 `cid` 用 `tip or "--"`（`tip` 可能是「连接失败」「休市」），会把长文案塞进涨跌幅列。本次统一改为：数值列一律 `--`，`tip` 只写进标题栏 `clock`（现有 `_tick` 已如此），不在列内显示文字。**落地要求**：`paint` 内不再出现 `tip or ...` 这类把 `tip` 当显示值的写法；`tip` 仅用于 `clock` 文本，数值列只从 `self.data` 取数 |
 | 行业缺失不阻断行情 | 行业值来自独立字典 `self.ind`，`paint` 取值时 `self.ind.get(code) or PLACEHOLDER_NA`，与 `self.data` 无耦合 |
 | 行业失败不连试 | 请求函数内 `try/except` 包住，投递 `("ind", None)` 后本进程不再发起；缓存过期检查只在启动时做 |
-| 指数/ETF 无行业 | 由 `need_industry(code)` 判定：`to_secid(code)` 非 `None` 才请求。`to_secid` 对 `sh000xxx`、`sz399xxx`、`hkHSTECH`、`hkHSI`、**`bj*`** 均返回 `None`；对 `hk00700` 这类港股个股返回 `116.00700`。**不复用 `is_index_code`**（它把 `hk*` 全判为指数） |
+| 指数/ETF 无行业 | 由 `need_industry(code)` 判定：指数与 `bj*` 返回 False 不请求；ETF 与港股个股请求（ETF 无命中按 §3.2.2 缓存 `""`）。**不复用 `is_index_code`**（它把 `hk*` 全判为指数） |
 | 行业列关闭时不发起首次请求 | 启动时若 `industry in self.col_hidden`，**不读缓存、不起线程**（省一次网络与写盘）。理由：行业是唯一需要额外请求的列，用户关掉它就不该产生流量 |
 | 关闭后又勾选则补发一次 | `toggle_column("industry")` 的**启用**分支里：若 `"ind_requested" not in self._logged` 且 `self.ind` 为空，则置标记并调一次 `_prepare_industry()`（走与启动相同的路径：先试缓存，无效再起线程）。**每个进程最多补发一次**，由 `self._logged` 集合去重。这样「先关行业 → 后来想看了」不会永久停在 `—`，与 PRD F-09「启用后可能短暂显示 `—`，数据返回自动填充」一致 |
 
@@ -676,11 +674,11 @@ sequenceDiagram
 | --- | --- | --- |
 | `fetch_quotes(codes)` | 修改 | 增加 `f[38]`→`turnover`、`f[49]`→`vr` 解析；按 `quote_kind()` 决定是否解析（`hk`/`idx` 置 `None`） |
 | `quote_kind(code)` | 新增 | 判定 `"hk"` / `"idx"` / `"stock"`，决定换手率、量比是否可信（§3.2.1） |
-| `fetch_industries(codes)` | 新增 | 组装 `secids`、请求东财、返回 `{code: name}`；异常返回 `None` 区分"失败"与"成功但为空" |
+| `fetch_industries(codes)` | 新增 | 组装 6 位码批量 `IN` 过滤、请求 datacenter、`EM2016` 取末段、按 `SECURITY_CODE` 回填 `{code: name}`；异常返回 `None` 区分"失败"与"成功但为空" |
 | `load_industry_cache()` | 新增 | 读缓存，校验 `stamp` 在 7 天内，返回 `{code: name}` 或 `None` |
 | `save_industry_cache(items)` | 新增 | 写 `industry_cache.json`，失败静默 |
-| `to_secid(code)` | 新增 | 腾讯代码 → 东财 `secid`；指数返回 `None` |
-| `need_industry(code)` | 新增 | 是否需要请求行业：`to_secid()` 非 `None` 即为真（**不复用 `is_index_code`**，见 §3.2.2） |
+| `to_secucode(code)` | 新增 | 腾讯代码 → 6 位证券代码（`code[2:]`）；指数与 `bj*` 返回 `None` |
+| `need_industry(code)` | 新增 | 是否需要请求行业：指数与 `bj*` 返回 False，其余为 True（**不复用 `is_index_code`**，见 §3.2.2） |
 | `Panel.load_columns()` | 新增 | 读 `columns`，调 `_sanitize_cols` 校验，必要时 `save_columns()` 回写；返回 `(order, hidden)` |
 | `Panel._sanitize_cols(order, hidden)` | 新增 | 纯函数：剔除未知键、去重、补 `name` 到首位、剔除 `name` 的 hidden 项；返回 `(order, hidden, repaired)` |
 | `Panel.save_columns()` | 新增 | 落盘 `config.json` 的 `columns` |
@@ -763,7 +761,7 @@ sequenceDiagram
 | --- | --- | --- | --- | --- |
 | 4.1.1 | §3.1.1 / §3.1.3 / §3.7.3 | `ticker.pyw` | `COL_KEYS` / `COL_DEF` / `PAD_L` / `PAD_R` / `GAP` / `SB_W` / `HDR_H` / `HDR_FONT_SIZE` / `NAME_MIN_W` / `HIDE_ORDER` / `IND_TTL_DAYS` / `IND_BATCH` / `IND_CACHE_FILE` / `PLACEHOLDER_NA` | 模块级常量，紧邻 `THEMES` 定义；`Panel.MIN_H` 单独改在类内 |
 | 4.1.2 | §3.2.1 | `ticker.pyw` | `quote_kind` / `fetch_quotes` | 新增 `quote_kind` 品种判定；`fetch_quotes` 扩展 `turnover` / `vr` |
-| 4.1.3 | §3.2.2 | `ticker.pyw` | `to_secid` / `need_industry` / `fetch_industries` | 新增 |
+| 4.1.3 | §3.2.2 | `ticker.pyw` | `to_secucode` / `need_industry` / `fetch_industries` | 新增 |
 | 4.1.4 | §3.1.3 | `ticker.pyw` | `load_industry_cache` / `save_industry_cache` | 新增 |
 | 4.1.5 | §3.1.1 | `ticker.pyw` | `Panel.load_columns` / `_sanitize_cols` / `save_columns` / `enabled_cols` | 新增 |
 | 4.1.6 | §3.4.1 / §3.4.2 / §3.4.3 | `ticker.pyw` | `Panel.compute_columns` / `Panel._need_width` | 新增，纯计算 |
@@ -811,7 +809,7 @@ sequenceDiagram
 | 外部系统 | 地址 | 依赖目的 | 失败影响 |
 | --- | --- | --- | --- |
 | 腾讯行情 | `https://qt.gtimg.cn/q=` | 价格、涨跌幅、量比、换手率 | 数值列 `--`，圆点变红（现有） |
-| 东方财富行情 | `https://push2.eastmoney.com/api/qt/ulist.np/get` | 行业名 | 行业列 `—` 或旧缓存，行情不受影响 |
+| 东方财富 datacenter | `https://datacenter-web.eastmoney.com/api/data/v1/get` | 行业名（`EM2016` 末段） | 行业列 `—` 或旧缓存，行情不受影响 |
 | 腾讯智能搜索 | `https://smartbox.gtimg.cn/s3/` | 管理面板搜索标的 | 与本次功能无关，沿用 |
 | Windows `shcore` / `user32` | `ctypes` | DPI 感知、重绘失效 | 取不到缩放时按 1.0 处理（现有） |
 | 本地文件系统 | `config.json` / `industry_cache.json` / `position.json` / `ticker.log` | 配置与缓存持久化 | 写失败静默，内存态仍可用 |
@@ -826,7 +824,7 @@ sequenceDiagram
 | Python | 3.8+，含 tkinter；无第三方包 |
 | DPI | 100% ~ 200% 缩放，列宽与高度一律经 `px()` 随缩放等比放大。`MIN_H = 96` 可被 1 / 1.25 / 1.5 / 2 四种缩放比整除，使 `px()` 在 100% / 125% / 150% / 200% 四档下均为整数（96 / 120 / 144 / 192），不产生半像素累积 |
 | 分辨率 | 1366×768 起。六列全开 `col_min_w = 420` 逻辑像素：100% 下 420 物理像素，150% 下 630，200% 下 840，均小于 1366，任何缩放档都能完整展示 |
-| 网络 | 可访问 `qt.gtimg.cn` 与 `push2.eastmoney.com`；内网需放行或走系统代理 |
+| 网络 | 可访问 `qt.gtimg.cn` 与 `datacenter-web.eastmoney.com`；内网需放行或走系统代理 |
 
 ### 6.2 关键配置项
 
@@ -884,8 +882,8 @@ sequenceDiagram
 | --- | --- | --- | --- | --- | --- | --- |
 | T001 | §3.1.1 / §3.7.3 | 新增 | `ticker.pyw` / 模块常量 `COL_KEYS` `COL_DEF` `HIDE_ORDER` `PAD_L` `PAD_R` `GAP` `HDR_H` `HDR_FONT_SIZE` `NAME_MIN_W` `IND_TTL_DAYS` `IND_BATCH` `PLACEHOLDER_NA` | 按 §3.1.1 与 §3.7.3 定义列键枚举、列宽/表头文字/对齐、降级顺序与边距常量 | F-01、F-02、F-03、F-04、F-05、F-11 | 待实现 |
 | T002 | §3.2.1 | 修改 | `ticker.pyw` / `quote_kind`、`fetch_quotes` | 新增 `quote_kind(code)` 按前缀判 `hk`/`idx`/`stock`；`hk`/`idx` 的 `turnover`/`vr` 直接置 `None`；`stock` 解析 `f[38]`→`turnover`、`f[49]`→`vr`（空串/非数字/负值 → `None`）；`len(f) < 50` 仅作兜底跳过，**不作为品种判据** | F-01、F-02 | 待实现 |
-| T003 | §3.2.2 | 新增 | `ticker.pyw` / `to_secid`、`need_industry` | 腾讯代码 → 东财 `secid`（`sh→1`、`sz→0`、`hk→116`）；**`bj` 与各类指数一律返回 `None`**（不推测北交所市场号）；`need_industry(code)` 即 `to_secid(code) is not None` | F-09、F-10 | 待实现 |
-| T004 | §3.2.2 | 新增 | `ticker.pyw` / `fetch_industries` | 按 80 一批请求 `ulist.np`，UTF-8 解码，返回 `{code: name}`（代码取**本批请求顺序**，不用 `f12`/`f13` 反查）；`rc≠0`/`diff` 为空/长度不等/异常 → 返回 `None` | F-09 | 待实现 |
+| T003 | §3.2.2 | 新增 | `ticker.pyw` / `to_secucode`、`need_industry` | 腾讯代码 → 证券数字段（去市场前缀：沪深 6 位、港股 5 位）；**`bj` 与各类指数一律返回 `None`**（不推测；编码期对 `430047` 试查一次登记结论）；`need_industry(code)`：指数与 `bj*` 为 False | F-09、F-10 | 已完成 |
+| T004 | §3.2.2 | 新增 | `ticker.pyw` / `fetch_industries` | 按 80 一批请求 datacenter `RPT_F10_BASIC_ORGINFO`（filter 全量 URL 转义），UTF-8 解码，`EM2016` 取末段、按 `SECURITY_CODE` 回填 `{code: name}`（顺序无关，缺失代码写缓存 `""`）；`code≠0`/`result` null/`data` 空/异常 → 返回 `None` 且不写缓存 | F-09 | 已完成 |
 | T005 | §3.1.3 | 新增 | `ticker.pyw` / `load_industry_cache`、`save_industry_cache` | 读写 `industry_cache.json`（文件名常量 `IND_CACHE_FILE` 见 T001，本任务只引用不定义），`stamp` 校验 7 天；损坏视为无缓存；写失败静默并记 `ticker.log` | F-09 | 待实现 |
 | T006 | §3.1.1 / §3.4.5 | 新增 | `ticker.pyw` / `Panel.load_columns`、`Panel._sanitize_cols`、`Panel.save_columns`、`Panel.enabled_cols` | 读取并校验 `columns.order/hidden`：剔除未知键、去重、补 `name` 首位；修正后回写 | F-08 | 待实现 |
 | T007 | §3.4.1 / §3.4.2 | 新增 | `ticker.pyw` / `Panel.compute_columns`、`Panel._need_width` | 计算 `col_x`、`col_min_w`、`vis_cols`、`need_hdr`；按 `HIDE_ORDER` 依次降级；纯函数无副作用 | F-04、F-05 | 待实现 |
@@ -899,3 +897,21 @@ sequenceDiagram
 | T015 | §3.3 链路 5 / §3.5.4 | 修改 | `ticker.pyw` / `WatchlistDialog`（新增 `TABS`、`_build_headers`、`on_tab`、`self._tab_items`）、`WatchlistDialog.build` | 面板加「标的 / 列」两套控件：`build()` 时一次全部 `create_window` 并登记 item id 到 `self._tab_items`；`on_tab` 只对两组 item 切 `state="hidden"/"normal"`（**不用 `place_forget`**）；`H` 522→600；居中偏置 `px(30)` 不变 | F-07 | 待实现 |
 | T016 | §3.5.4 / §3.3 链路 5 | 修改 | `ticker.pyw` / `WatchlistDialog.draw_cols_tab`、`Panel.move_column`、`Panel.reset_columns` | 列页签内容：6 行清单（序号 + 列名 + ↑↓）、首行 ↑ 与末行 ↓ 禁用、「恢复默认」；移动/恢复后刷新主窗重绘 | F-07 | 待实现 |
 | T017 | §3.6 | 修改 | `.gitignore` | 追加 `industry_cache.json`（由 T005 的 `save_industry_cache` 在首次取到行业后生成，属本机运行时数据，不进仓库）。**顺序依赖：须在 T005 完成后落地**，否则 TC 首次跑 T005 时会把缓存文件误提交 | F-09 | 待实现 |
+
+### 10.x 行业数据源迁移编码记录（2026-10-30，T003/T004）
+
+实测（本机，同一进程内一次性批量）：
+
+| 标的 | `to_secucode` | `need_industry` | 返回行业（`EM2016` 末段） |
+| --- | --- | --- | --- |
+| `sh600519` | `600519` | True | 白酒 |
+| `sz300750` | `300750` | True | 储能设备 |
+| `sz002594` | `002594` | True | 乘用车 |
+| `sh510300`（ETF） | `510300` | True | `""`（报表无 F10 记录 → 落 7 天缓存） |
+| `hk00700` | `00700` | True | `""`（实测该报表不含港股，与旧版一致） |
+| `sh000001` / `sz399001` | None | False | 不请求（指数无行业） |
+| `bj430047` | None | False | 不请求（编码期实测项，维持旧口径） |
+
+批量 19 个自选标的整体用时 **0.38s**（旧 push2 通道已整域断连，无法对比）。
+`selftest` 的 `[ind]` 段同步可用（19/19 条）。**结论：`push2` → `datacenter-web`
+迁移闭环，列宽 56、截断规则、7 天缓存与后台线程均未改动。**
