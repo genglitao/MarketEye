@@ -111,6 +111,14 @@
         {
           "code": "sz300750",
           "alias": "宁德时代"
+        },
+        {
+          "code": "sz159207",
+          "alias": "高股息ETF广发"
+        },
+        {
+          "code": "sz000799",
+          "alias": "酒鬼酒"
         }
       ]
     }
@@ -129,7 +137,29 @@
       "turnover"
     ]
   },
-  "height": 713,
+  "height": 763,
   "marquee_interval": 2,
-  "show_amount": true
+  "show_amount": true,
+  "drawings": {},
+  "kline": {
+    "w": 880,
+    "h": 640,
+    "period": "day",
+    "custom": {
+      "n": 45,
+      "unit": "min"
+    },
+    "custom_on": false,
+    "fq": "qfq",
+    "ma": {
+      "ma5": true,
+      "ma10": true,
+      "ma20": true,
+      "ma60": true,
+      "ma120": true,
+      "ma250": true
+    },
+    "x": 620,
+    "y": 213
+  }
 }
