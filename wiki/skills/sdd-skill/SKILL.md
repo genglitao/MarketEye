@@ -69,7 +69,7 @@ description: "技术设计环节技能。负责详细技术设计与SDD文档生
 
 **界面设计**：
 - 如存在 PROTO，引用 PROTO 文件路径，不再重复描述布局和交互，仅补充技术层面内容：画布元素与绘制函数映射、状态变量（折叠/滚动/缩放中）、坐标与 `px()` 换算
-- 如无 PROTO，按 doc-rules.md §5.2 完整描述：窗口布局、交互流程、视觉状态（配色/字体/圆角，取值见 ui-rules.md）
+- 如无 PROTO，按 [doc-templates.md](../rules/doc-templates.md) §5.2 完整描述：窗口布局、交互流程、视觉状态（配色/字体/圆角，取值见 ui-rules.md）
 
 ### 步骤4：产出SDD文档
 
@@ -89,7 +89,7 @@ SDD 产出后，**必须**按 [文档规范](../rules/doc-rules.md) §9 同步�
 
 ### 步骤6：独立审核
 
-启动**独立的 Agent 实例**，依据 [doc-rules](../rules/doc-rules.md) §5.2、§6.3 和 §7 对产出的 SDD 文档进行合规性审核。审核通过后流程结束，等待用户指示下一步。产生 SDD 的 AI 不得自行审核。
+启动**独立的 Agent 实例**，依据 [doc-templates](../rules/doc-templates.md) §5.2 与 [doc-rules](../rules/doc-rules.md) §6.3、§7 对产出的 SDD 文档进行合规性审核。审核通过后流程结束，等待用户指示下一步。产生 SDD 的 AI 不得自行审核。
 
 ## 注意事项
 

@@ -52,7 +52,7 @@ description: "需求环节技能。负责需求思路的整理以及PRD文档生
 
 ### 步骤3：生成PRD文档
 
-按 [doc-rules](../../rules/doc-rules.md) 生成 `PRD-{模块名}-{功能名}-v{版本号}.md`，详见该规范 §5.1。产出按该规范 §3 输出。
+按 [doc-templates](../../rules/doc-templates.md) §5.1 的章节骨架生成 `PRD-{模块名}-{功能名}-v{版本号}.md`；产出目录按 [doc-rules](../../rules/doc-rules.md) §3。
 
 ### 步骤4：询问并生成原型
 
@@ -70,7 +70,7 @@ PRD（及 PROTO 如已生成）产出后，**必须**按 [doc-rules](../../rules
 
 ### 步骤6：独立审核
 
-启动**独立的 Agent 实例**，依据 [doc-rules](../../rules/doc-rules.md) §4、§5.1 和 §6.1 对产出的 PRD 文档进行合规性审核。产生 PRD 的 AI 不得自行审核。
+启动**独立的 Agent 实例**，依据 [doc-rules](../../rules/doc-rules.md) §4、§6.1 与 [doc-templates](../../rules/doc-templates.md) §5.1 对产出的 PRD 文档进行合规性审核。产生 PRD 的 AI 不得自行审核。
 
 独立审核必须包含变更记录唯一性检查：
 
