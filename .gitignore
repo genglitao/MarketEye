@@ -12,3 +12,6 @@ _tc_*.json
 _tc_*.log
 !_tc_r05.log
 _t[0-9]*.log
+
+# 发布打包产物，本地留档不入库（发布包以 Release 附件形式分发）
+_release/

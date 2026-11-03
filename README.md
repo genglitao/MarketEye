@@ -10,6 +10,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)
 ![Single file](https://img.shields.io/badge/entry-ticker.pyw-informational?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
 </div>
 
@@ -226,6 +227,4 @@ wiki/
 
 ## 说明
 
-- 数据来自腾讯行情公开接口，仅供个人学习与研究使用，**不构成任何投资建议**
-- 行情延迟以数据源为准，请勿用于实盘交易决策
-- 未指定开源许可证；如需转载或二次分发，请先联系作者
+- 采用 [MIT License](LICENSE) 开源；行情数据来自公开接口，仅供个人学习与研究使用，**不构成任何投资建议**，据此操作风险自担
