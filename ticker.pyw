@@ -3762,6 +3762,7 @@ class KlineWin:
         self.use_custom = st["custom_on"]   # AC-24：重开沿用自定义档
         self.fq = st["fq"]
         self.ma = dict(st["ma"])
+        self._ma_legend = []          # 均线图例 [(text_id, N, vals)]，BUG-07
 
         self.state = "K1"
         self.base_bars = []           # 基础周期原始 bar（缓存与聚合的输入）
@@ -4362,6 +4363,7 @@ class KlineWin:
         cv.delete("chart", "vol", "macd", "axis", "cross", "state", "draw", "drawp")
         self._vol_val_id = None
         self._macd_val_ids = None
+        self._ma_legend = []
         n = len(self.bars)
         self.view_off = self._clamp_off(self.view_off)
         l = self._lidx()
@@ -4419,6 +4421,33 @@ class KlineWin:
                 li["ma"].append(cv.create_line(*pts, fill=col, width=1, tags="chart"))
             else:
                 li["ma"].append(None)
+        # 均线图例（BUG-07 / PRD F-06-3）：主图左上角单行，颜色同线，顺序 MA5→MA250；
+        # 只列「已勾选且有值」的周期，数值精度跟随价格轴（fmt_price），右侧价格轴前截断。
+        # 先量宽再铺底色衬板：均线会从数值上穿过，不加衬板影响可读性
+        self._ma_legend = []
+        lx, ly = self.px(6), self.px(14)
+        limit = self.ax_x - self.px(10)
+        plan = []
+        for (vals, _n), col, mid in zip(self._ma, ma_cols, li["ma"]):
+            if mid is None:
+                continue
+            v = vals[n - 1] if n - 1 < len(vals) else None
+            if v is None:
+                continue
+            txt = f"MA{_n} {fmt_price(v)}"
+            wid = self.f_small.measure(txt) * 1.08
+            if lx + wid > limit:
+                break
+            plan.append((lx, txt, col, wid, vals, _n))
+            lx += wid + self.px(10)
+        if plan:
+            xe = plan[-1][0] + plan[-1][3] + self.px(4)
+            cv.create_rectangle(self.px(3), self.px(3), xe, self.px(24),
+                                fill=t["bg"], outline="", tags="chart")
+            for px_, txt, col, _w, vals, _n in plan:
+                tid = cv.create_text(px_, ly, anchor="w", text=txt, fill=col,
+                                     font=self.f_small, tags="chart")
+                self._ma_legend.append((tid, _n, vals))
         # 最新价虚线 + 右轴标签（底色=当日涨跌色；末根优先用报价昨收，
         # 历史/无报价时退化为前一根收盘）
         last = self.bars[n - 1]
@@ -4527,8 +4556,22 @@ class KlineWin:
             x += fnt.measure(txt) * 1.08 + self.px(12)
         self._macd_val_ids = ids
 
+    def _sync_ma_legend(self, j):
+        """均线图例数值联动（BUG-07）：j=None 回落最新根；分时档/无图例直接返回。"""
+        items = getattr(self, "_ma_legend", None)
+        n = len(self.bars)
+        if not items or n == 0:
+            return
+        j = n - 1 if j is None else max(0, min(n - 1, j))
+        for tid, nn, vals in items:
+            v = vals[j] if j < len(vals) else None
+            try:
+                self.cv.itemconfig(tid, text="" if v is None else f"MA{nn} {fmt_price(v)}")
+            except Exception:
+                pass
+
     def _sync_titles(self, i):
-        """量 / MACD 标题行数值随十字光标联动；i=None 回落最新根（T026）。"""
+        """量 / MACD / 均线标题行数值随十字光标联动；i=None 回落最新根（T026）。"""
         if self._is_tick():
             self._sync_titles_tick(i)
             return
@@ -4548,6 +4591,7 @@ class KlineWin:
                     cv.itemconfig(tid, text=f"{nm}:{v:.2f}")
         except Exception:
             pass
+        self._sync_ma_legend(j)
 
     # ---------- 分时档（F-13：T021 / T025 / T027 / T028）----------
     def _is_tick(self):
@@ -4566,6 +4610,7 @@ class KlineWin:
         cv.delete("chart", "vol", "macd", "axis", "cross", "state", "draw", "drawp")
         self._vol_val_id = None
         self._macd_val_ids = None
+        self._ma_legend = []          # 分时档无均线，图例不显示（BUG-07）
         md = self.min_data
         slots, price = md["slots"], md["price"]
         ns = len(slots)
@@ -4936,6 +4981,9 @@ class KlineWin:
             if len(pts) >= 2 and vals[-1] is not None:
                 pts[-1] = self._y_of(vals[-1])
                 cv.coords(mid, *pts)
+        # 报价刷新后末根均线值已重算，图例数值同步（BUG-07）
+        if getattr(self, "hover", None) is None:
+            self._sync_ma_legend(len(self.bars) - 1)
 
     def draw_cross(self, x, y):
         """十字光标：横坐标吸附最近 bar 中心；只重建 tag cross（≤8ms）。"""
@@ -4994,7 +5042,9 @@ class KlineWin:
                 ("成交量", fmt_vol(b[5]), t["text"]),
                 ("成交额", fmt_amount(b[6]) if b[6] else AMT_EMPTY, t["text"])]
         fw = max(self.f_num.measure(r[1]) for r in rows) + self.px(10)
-        x0, y0 = self.px(6), self.px(6)
+        # 浮层从图例行下沿起画，避免压住左上角均线图例（BUG-07）
+        x0 = self.px(6)
+        y0 = self.px(6) + (self.px(26) if getattr(self, "_ma_legend", None) else 0)
         lh = self.px(15)
         hgt = lh * len(rows) + self.px(10)
         # 注意：不能用主面板的 _amt_round_rect —— 那是 KEY 颜色键遮罩画法，
