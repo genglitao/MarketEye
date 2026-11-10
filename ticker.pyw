@@ -99,10 +99,17 @@ HIDE_ORDER = ["industry", "turnover", "vr", "pct", "price"]
 PAD_L = 14          # 内容区左内边距
 PAD_R = 8           # 内容区右内边距
 GAP = 6             # 列间距
-SB_W = 10           # 右侧滚动条条带宽度
 HDR_H = 18          # 固定表头条带高度
 HDR_FONT_SIZE = 8   # 表头字号
 NAME_MIN_W = 60     # 名称列最小宽度
+
+# ---------------------------------------------------------------- 自选分页
+# 展开态列表整页分页（SDD §3.7.1）：滚动条移除，页高按最坏页常数化。
+PAGE_SIZES = (5, 8, 10, 15, 20)       # 每页条数档位（升序）
+PAGE_SIZE_DEFAULT = 10                # 默认档
+PAGE_FOOT_H = 22                      # 翻页条条带高度（逻辑像素，经 px()）
+PAGE_CHAR_PREV, PAGE_CHAR_NEXT = "‹", "›"
+PAGE_SCREEN_MARGIN = 80               # R-11 屏幕可用高度余量（逻辑像素，含任务栏）
 
 PLACEHOLDER_NA = "—"   # 字段有行情但该字段无数据
 PLACEHOLDER_NONE = "--"  # 整行无行情（停牌/未开盘/请求失败）
@@ -377,6 +384,47 @@ def marq_list(cfg):
                 seen.add(c)
                 out.append((c, it.get("alias")))
     return out
+
+
+def page_meta(groups):
+    """分组配置 → 分页元素序列 [(kind, payload, owner)]（自选分页 T003）。
+
+    kind='h'：组头，payload=分组名，owner=该组首只股票的全局行号；
+    kind='r'：股票行，payload=(code, alias)，owner=自身全局行号。
+    组头只记录、不占行号位（SDD 裁决 D2），因此恒渲染在其首行正上方、
+    永不孤立在页尾。空分组 / 无有效代码的分组不产生任何元素。
+    只接收 groups，不依赖 Panel 实例，便于 --selftest 直接调用。
+    """
+    meta = []
+    gidx = 0
+    for g in groups:
+        rows = []
+        for item in (g.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            code = normalize(item.get("code", ""))
+            if not code:
+                continue
+            rows.append(("r", (code, item.get("alias")), gidx))
+            gidx += 1
+        if rows:
+            meta.append(("h", g.get("name", ""), rows[0][2]))
+            meta.extend(rows)
+    return meta
+
+
+def page_slice(meta, page, size):
+    """元素序列 → (当前页元素, 总页数, 实际页码)（自选分页 T003）。
+
+    行区间取 [page*size, page*size+size)（页码钳制到 [0, total-1] 后）；
+    组头 owner（= 其首行的全局行号）落在区间内则随页渲染。size 必须 >= 1。
+    """
+    size = max(1, int(size))
+    n = len([m for m in meta if m[0] == "r"])
+    total = max(1, -(-n // size))
+    page = min(max(int(page), 0), total - 1)
+    lo, hi = page * size, page * size + size
+    return ([m for m in meta if lo <= m[2] < hi], total, page)
 
 
 def is_trading(now=None):
@@ -1352,6 +1400,13 @@ class Panel:
         self.menu_marq = None       # 「轮播间隔」子菜单
         self.marquee_interval = self.load_marq_interval()
 
+        # 自选分页状态：page_idx 仅内存（不持久化，R-06 界面重建时保持）
+        self.menu_page = None       # 「每页条数」子菜单
+        self.page_entry = {}        # 档位条数 -> 子菜单内项索引
+        self.page_size = self.load_page_size()
+        self.page_idx = 0
+        self.pg_prev_id = self.pg_next_id = self.pg_label_id = None
+
         # 列状态：先加载配置，菜单才能取到正确的初始勾选态
         self.col_order = list(COL_KEYS)
         self.col_hidden = set()
@@ -1495,12 +1550,15 @@ class Panel:
 
     # ---------- 布局计算（F-04 / F-05） ----------
     def _need_width(self, cols):
-        """cols 完整显示所需的窗口宽度（物理像素，含滚动条条带）。"""
+        """cols 完整显示所需的窗口宽度（物理像素）。
+
+        自选分页后无滚动条条带，不再预留 SB_W（SDD §3.5 列布局连带）。
+        """
         fixed = sum(self.px(COL_DEF[k][3]) for k in cols if k != "name")
         n = len([k for k in cols if k != "name"])
         gaps = self.px(GAP) * max(0, len(cols) - 1)
         return (self.px(PAD_L) + fixed + gaps + self.px(NAME_MIN_W)
-                + self.px(SB_W) + self.px(PAD_R))
+                + self.px(PAD_R))
 
     def _layout_of(self, vis, win_w):
         """按给定列集合与窗口宽度分列宽，返回 (col_x, CW)。
@@ -1510,7 +1568,7 @@ class Panel:
         """
         fix = sum(self.px(COL_DEF[k][3]) for k in vis if k != "name")
         gaps = self.px(GAP) * max(0, len(vis) - 1)
-        CW = win_w - self.px(SB_W)
+        CW = win_w                # 分页模式无滚动条条带，内容宽 = 窗口宽
         rest = CW - self.px(PAD_L) - self.px(PAD_R) - fix - gaps
         name_w = max(self.px(NAME_MIN_W), rest)
 
@@ -2212,6 +2270,76 @@ class Panel:
         log_once("marq interval repaired")
         return MARQ_INTERVAL_DEFAULT
 
+    # ---------- 自选分页 ----------
+    def load_page_size(self):
+        """读 page_size 并校验：缺键按默认且不回写，有值但非法才修回。"""
+        v = self.cfg.get("page_size")
+        if v is None:
+            # 缺键不写盘：load_json 在文件损坏时返回 {}，此时回写会清空用户配置
+            return PAGE_SIZE_DEFAULT
+        try:
+            n = int(v)
+            ok = (n == v) and n in PAGE_SIZES
+        except (TypeError, ValueError):
+            ok, n = False, 0
+        if ok:
+            return n
+        self.cfg["page_size"] = PAGE_SIZE_DEFAULT
+        save_json(CONFIG_FILE, self.cfg)
+        log_once("page size repaired")
+        return PAGE_SIZE_DEFAULT
+
+    def set_page_size(self, n):
+        """切换每页条数：按「翻页前第一只可见股票」映射页码，落盘并重建。
+
+        first // new_size 的整除映射恒使该行落在映射后的当前页（SDD 裁决
+        D4，PRD R-09 的回第 1 页分支不可达）；末页收缩由 page_slice 钳制兜底。
+        """
+        if n not in PAGE_SIZES or n == self.page_size:
+            return
+        meta = page_meta(self._paged_groups())
+        total = max(1, -(-len([m for m in meta if m[0] == "r"]) // n))
+        first = self.page_idx * self.page_size
+        self.page_size = n
+        self.page_idx = min(first // n, total - 1)
+        self.cfg["page_size"] = n
+        save_json(CONFIG_FILE, self.cfg)      # 内部吞异常，失败静默（与轮播档一致）
+        self._rebuild()
+        self._refresh_page_menu()
+
+    def page_flip(self, delta):
+        """整页翻动（滚轮与翻页条共用入口，R-05）：越界方向无动作。
+
+        页码变化才走 _rebuild（裁决 D3，与缩放松手/换肤同一条重建路径）。
+        """
+        if self.folded:
+            return
+        meta = page_meta(self._paged_groups())
+        total = max(1, -(-len([m for m in meta if m[0] == "r"]) // self.page_size))
+        page = self.page_idx + (1 if delta > 0 else -1)
+        if page < 0 or page >= total:
+            return
+        self.page_idx = page
+        self._rebuild()
+
+    def _paged_groups(self):
+        """与 build() 同口径的非空分组清单。"""
+        return [g for g in self.cfg.get("groups", []) if g.get("items")]
+
+    def _refresh_page_menu(self):
+        """按当前档位刷新「每页条数」各档的对勾位图。"""
+        pm = getattr(self, "menu_page", None)
+        if pm is None:
+            return
+        for n, idx in getattr(self, "page_entry", {}).items():
+            try:
+                pm.entryconfigure(idx,
+                                  image=self.img_chk_on if n == self.page_size
+                                  else self.img_chk_off,
+                                  compound="left")
+            except Exception as ex:
+                self._dbg(f"page menu 刷新异常: {ex!r}")
+
     def _marq_fonts(self):
         """轮播 / 成交额共用的字体对象（正数点数，DPI 感知进程内与画布同域）。"""
         if getattr(self, "_f_marq", None) is not None:
@@ -2479,6 +2607,21 @@ class Panel:
             self.marq_entry[sec] = mm.index("end")
         m.add_cascade(label="轮播间隔", menu=mm)
 
+        # 每页条数（自选分页 F-03）：同一套白色对勾位图与索引机制
+        pm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
+                     activebackground="#3B4A63", activeforeground="#FFFFFF",
+                     font=(self.f_cn, 9))
+        self.menu_page = pm
+        self.page_entry = {}
+        for n_ in PAGE_SIZES:
+            on = n_ == self.page_size
+            pm.add_command(label=f"{n_} 条",
+                           image=self.img_chk_on if on else self.img_chk_off,
+                           compound="left",
+                           command=lambda k=n_: self.set_page_size(k))
+            self.page_entry[n_] = pm.index("end")
+        m.add_cascade(label="每页条数", menu=pm)
+
         # 显示两市成交额：同款白色对勾位图（不用 checkbutton，理由见上）
         m.add_command(label="显示两市成交额",
                       image=self.img_chk_on if self.show_amount else self.img_chk_off,
@@ -2497,7 +2640,6 @@ class Panel:
         m.add_checkbutton(label="窗口置顶", variable=self.var_top, command=self.toggle_top)
 
         m.add_command(label="折叠 / 展开", command=self.toggle_fold)
-        m.add_command(label="恢复自适应高度", command=self.reset_size)
         # 行上下文两项：state 由 on_menu 每次弹出前按命中行动态置位/置灰
         m.add_command(label="查看K线", command=self._menu_kline)
         self.kline_menu_idx = m.index("end")
@@ -2536,19 +2678,21 @@ class Panel:
         self.W = max(self.px(self.MIN_W), self.px(int(cfg.get("width", 268))))
         enabled = self.enabled_cols()
 
-        # 内容所需高度 vs 可视高度（超出则滚动）
+        # 分页几何（自选分页 SDD §3.5）：页高按最坏页常数化（裁决 D1）——
+        # size 只股票行 + G 行组头各按自身行高，翻页/切档间窗口不跳动。
+        # 展开态不再读取 height/max_height（SDD §3.1 兼容规则，磁盘键保留）。
         n = sum(len(g.get("items", [])) for g in groups)
-        need = len(groups) * self.grp_h + n * self.row_h + self.px(10)
-        limit = max(self.row_h * 2, self.px(int(cfg.get("max_height", 520))) - self.head_h)
-        user_h = cfg.get("height")            # 手动调整过的高度（逻辑像素）
+        G = len(groups)
+        size = self.page_size
         if self.folded:
             need = 0
+            self.rows_area = 0
+            self.foot_h = 0
             self.vis_h = 0
-        elif user_h:
-            # 用户拖过边框：窗口高度听用户的，内容不足时下方留白
-            self.vis_h = max(self.row_h * 2, self.px(int(user_h)) - self.head_h)
         else:
-            self.vis_h = min(need, limit)     # 自适应：跟内容长，超过 max_height 才滚动
+            self.rows_area = size * self.row_h + G * self.grp_h + self.px(10)
+            self.foot_h = self.px(PAGE_FOOT_H) if n > size else 0
+            need = self.rows_area
         self.need_h = need
         self.body_r = self.px(16)                 # 圆角半径
 
@@ -2573,11 +2717,34 @@ class Panel:
         self.vis_cols, self.col_x, self.col_min_w, self.need_hdr = \
             self.compute_columns(self.W, enabled)
 
-        # 内容画布比窗口正文矮表头 + 一个圆角（底部那条留给 cv 画圆角底边）
-        # vis_h 恒为"标题栏以下全部高度"，本身从不含表头
-        self.vis_cc = max(self.row_h, self.vis_h
-                          - (self.px(HDR_H) if self.need_hdr else 0) - self.body_r)
-        self.scrollable = need > self.vis_cc
+        # 展开态页高（R-03 高度锁定）：表头 + 行区 + 翻页条
+        if not self.folded:
+            self.vis_h = ((self.px(HDR_H) if self.need_hdr else 0)
+                          + self.rows_area + self.foot_h)
+            # R-11：页高超屏幕可用高度时按比例收紧行高（只影响行区，
+            # 表头/标题栏/字体不变）；winfo_screenheight 异常则不收紧
+            try:
+                avail = self.root.winfo_screenheight() - self.px(PAGE_SCREEN_MARGIN)
+            except Exception:
+                avail = 0
+            if avail > 0 and self.head_h + self.vis_h > avail:
+                denom = size * self.row_h + G * self.grp_h
+                k = (max(0.0, (avail - self.head_h
+                               - (self.px(HDR_H) if self.need_hdr else 0)
+                               - self.foot_h - self.px(10)) / denom)
+                     if denom > 0 else 1.0)
+                if k < 1.0:
+                    self.row_h = max(self.px(16), int(self.row_h * k))
+                    self.grp_h = max(self.px(14), int(self.grp_h * k))
+                    self.rows_area = size * self.row_h + G * self.grp_h + self.px(10)
+                    self.need_h = self.rows_area
+                    self.vis_h = ((self.px(HDR_H) if self.need_hdr else 0)
+                                  + self.rows_area + self.foot_h)
+
+        # 分页模式：内容画布高度恒等于行区（永不滚动），
+        # 底部圆角与翻页条留给 cv（cc 是真实子窗口，会盖住 cv 元素）
+        self.vis_cc = self.row_h if self.folded else self.rows_area
+        self.scrollable = False        # sb_*/update_scrollbar 保留，走短路兼容
         self.H = self.head_h + self.vis_h
         self.cc_top = self.head_h + (self.px(HDR_H) if self.need_hdr else 0)
 
@@ -2598,6 +2765,10 @@ class Panel:
                 pass
         self.cc = None
         self.sb_id = None
+        self.track_id = None
+        # 翻页条 item id 同样无条件复位（Tk 对失效 id 静默错指向，
+        # 与 marq_name_id/amt_ids 同一防错模式）
+        self.pg_prev_id = self.pg_next_id = self.pg_label_id = None
 
         # 窗口形状（圆角主体 + 圆角标题栏）自绘在 cv 上
         self._draw_body()
@@ -2635,53 +2806,44 @@ class Panel:
         self.marq_idx = 0
         self.marq_cancel()
 
-        # 内容画布：固定视口，内容超高时滚动
-        # 右侧预留 SB_W 宽的条带给滚动条——内容画布是真实子窗口，
-        # 画在它下面的 cv 元素会被盖住，所以滚动条必须落在条带里。
-        self.SB_W = self.px(SB_W)
-        self.CW = self.W - self.SB_W
-        # 表头画在 cv 固定条带上（cc 会盖住 cv，所以不能画进 cc）
+        # 内容画布：固定视口（自选分页：滚动条移除，CW = W 全宽，列宽
+        # 多出原条带 10 逻辑像素）。表头画在 cv 固定条带上（cc 会盖住
+        # cv，所以不能画进 cc）；翻页条画在 cc 下方的 cv 条带里。
+        self.CW = self.W
         self._draw_header(self.cc_top)
 
         self.cc = tk.Canvas(self.cv, bg=t["bg"], highlightthickness=0, bd=0)
         self.cc_win = self.cv.create_window(0, self.cc_top, window=self.cc,
                                             anchor="nw",
                                             width=self.CW, height=self.vis_cc)
-        self.cc.configure(scrollregion=(0, 0, self.CW, need),
-                          yscrollincrement=self.row_h)
         self._bind_canvas(self.cc)
 
-        # 滚动条：轨道 + 滑块（在预留条带内，可拖动）
-        self.track_id = self.cv.create_rectangle(self.W - self.px(9), self.cc_top,
-                                                 self.W - self.px(1),
-                                                 self.cc_top + self.vis_cc,
-                                                 fill=t["line"], outline="", width=0)
-        self.sb_id = self.cv.create_rectangle(0, 0, 0, 0,
-                                              fill=t.get("bar", t["sub"]), outline="")
-        self.cv.tag_bind(self.sb_id, "<Button-1>", self.sb_press)
-        self.cv.tag_bind(self.sb_id, "<B1-Motion>", self.sb_drag)
+        # 分页切片渲染：rows/hit 只装当前页，paint/行交互零改动自动收敛
+        # （SDD §3.3 链路 4）；组头不占切片位、恒渲染在其首行正上方（D2）
+        meta = page_meta(groups)
+        page_items, total, page_idx = page_slice(meta, self.page_idx, self.page_size)
+        self.page_idx = page_idx          # 越界钳制回写（R-02）
+        self.page_total = total
 
         y = 0
-        for g in groups:
-            self.cc.create_text(self.px(PAD_L), y + self.grp_h / 2, anchor="w",
-                                text=g.get("name", ""), fill=t["sub"],
-                                font=(self.f_cn, 8))
-            self.cc.create_line(self.px(PAD_L) + self.px(52), y + self.grp_h / 2,
-                                self.CW - self.px(PAD_R), y + self.grp_h / 2,
-                                fill=t["line"])
-            y += self.grp_h
-
-            for item in g.get("items", []):
-                code = normalize(item.get("code", ""))
-                if not code:
-                    continue
+        for kind, payload, _owner in page_items:
+            if kind == "h":
+                self.cc.create_text(self.px(PAD_L), y + self.grp_h / 2, anchor="w",
+                                    text=payload, fill=t["sub"],
+                                    font=(self.f_cn, 8))
+                self.cc.create_line(self.px(PAD_L) + self.px(52), y + self.grp_h / 2,
+                                    self.CW - self.px(PAD_R), y + self.grp_h / 2,
+                                    fill=t["line"])
+                y += self.grp_h
+            else:
+                code, alias = payload
                 cy = y + self.row_h / 2
                 ids = {}
                 for k in self.vis_cols:
                     x0, x1 = self.col_x[k]
                     if k == "name":
                         ids[k] = self.cc.create_text(x0, cy, anchor="w",
-                                                     text=trunc(item.get("alias") or code),
+                                                     text=trunc(alias or code),
                                                      fill=t["name"],
                                                      font=(self.f_cn, 9))
                     else:
@@ -2689,16 +2851,55 @@ class Panel:
                                                      text=PLACEHOLDER_NONE,
                                                      fill=t["flat"],
                                                      font=(self.f_num, 9, "bold"))
-                self.rows.append((code, item.get("alias"), ids))
+                self.rows.append((code, alias, ids))
                 self.hit.append((y, y + self.row_h, code))
                 y += self.row_h
 
+        # 页脚翻页条（多页时；单页态方法内部直接返回）
+        self._draw_page_footer(t)
         self.apply_geometry()
         self.paint()
-        self.update_scrollbar()
         self._draw_masks()
-        # 窗口完成映射后再校准一次（此时画布才有真实尺寸）
-        self.root.after(80, self.update_scrollbar)
+
+    def _draw_page_footer(self, t):
+        """页脚翻页条「‹ 页码/总页数 ›」（自选分页 F-02，SDD §3.5）。
+
+        画在 cc 下方的 cv 条带（cc 是真实子窗口会盖住 cv，所以必须在
+        行区之外）。无背景无边框：箭头可用态 sub / 置灰态 line，热区是
+        同底色矩形（不可见但可点），只给可用方向绑回调并 return "break"
+        阻断窗口拖动。单页态（foot_h=0）不画。
+        """
+        if self.foot_h <= 0 or self.cc is None:
+            return
+        c = self.cv
+        cy = self.cc_top + self.rows_area + self.foot_h / 2
+        cx = self.CW / 2
+        f_arrow = (self.f_num, 10)
+        f_label = (self.f_num, 8)
+
+        def _hot(x0, x1, fn):
+            hid = c.create_rectangle(x0, cy - self.px(11), x1, cy + self.px(11),
+                                     fill=t["bg"], outline="", width=0)
+            c.tag_bind(hid, "<Button-1>",
+                       lambda e: (fn(), "break")[1])
+            return hid
+
+        c.create_text(cx - self.px(30), cy, text=PAGE_CHAR_PREV,
+                      fill=t["sub"] if self.page_idx > 0 else t["line"],
+                      font=f_arrow)
+        self.pg_prev_id = (_hot(cx - self.px(42), cx - self.px(18),
+                                lambda: self.page_flip(-1))
+                           if self.page_idx > 0 else None)
+        self.pg_label_id = c.create_text(cx, cy,
+                                         text=f"{self.page_idx + 1}/{self.page_total}",
+                                         fill=t["sub"], font=f_label)
+        c.create_text(cx + self.px(30), cy, text=PAGE_CHAR_NEXT,
+                      fill=(t["sub"] if self.page_idx < self.page_total - 1
+                            else t["line"]),
+                      font=f_arrow)
+        self.pg_next_id = (_hot(cx + self.px(18), cx + self.px(42),
+                                lambda: self.page_flip(1))
+                           if self.page_idx < self.page_total - 1 else None)
 
     # ---------- 窗口形状（圆角） ----------
     def _draw_body(self):
@@ -2774,10 +2975,13 @@ class Panel:
 
     # ---------- 滚动 ----------
     def on_wheel(self, e):
-        if self.cc is None or not self.scrollable:
+        """展开态滚轮整页翻动（自选分页 F-02）：上滚上一页、下滚下一页。
+
+        折叠态无动作；单页态由 page_flip 的越界判定自然吞掉。
+        """
+        if self.cc is None or self.folded:
             return
-        self.cc.yview_scroll(-2 if e.delta > 0 else 2, "units")
-        self.update_scrollbar()
+        self.page_flip(-1 if e.delta > 0 else 1)
 
     def _ev_y(self, e):
         """把事件坐标统一换算到主画布坐标系（内容画布有 cc_top 偏移）。
@@ -3140,9 +3344,20 @@ class Panel:
                 "ne": "size_ne_sw", "sw": "size_ne_sw"}
 
     def _edge_hit(self, x, y):
-        """按窗口坐标判断指针所处的边/角，返回如 'e' 'nw' 的方向串。"""
+        """按窗口坐标判断指针所处的边/角，返回如 'e' 'nw' 的方向串。
+
+        展开态纵向锁定（自选分页 R-03）：页高由分页几何决定，上下边不
+        参与缩放——方向串不追加 n/s 分量，四角退化为纯 w/e。折叠态返回
+        值不变（纵向锁死由 on_drag 既有复位分支处理）。
+        """
         t = self.px(self.EDGE)
         d = ""
+        if not self.folded:
+            if x <= t:
+                d += "w"
+            elif x >= self.W - t:
+                d += "e"
+            return d or None
         if y <= t:
             d += "n"
         elif y >= self.H - t:
@@ -3236,15 +3451,18 @@ class Panel:
             # 折叠态纵向不可缩放：minh = px(MIN_H) = 144 远大于标题栏 51，
             # 一拖上下边框就会撑出 93px 空白区（静默错，不报错）。纵向视为无操作。
             h, y = self.head_h, self._ry
+        elif "n" in self._rdir or "s" in self._rdir:
+            # 展开态纵向锁定（自选分页 R-03）：页高由分页几何决定，
+            # 纵向拖拽视为无操作（_edge_hit 已不产 n/s，此处双保险）
+            h, y = self.H, self._ry
         self.W, self.H = int(w), int(h)
         self._last_pos = (int(x), int(y))
         self.root.geometry(f"{self.W}x{self.H}+{int(x)}+{int(y)}")
         # 尺寸即时同步进内存里的 cfg：拖动中若有任何路径触发 _rebuild，
         # build 才不会拿旧值把窗口拽回原大小。只改内存不落盘，写文件
-        # 仍交给 on_release，免得每帧都做一次 IO。
+        # 仍交给 on_release，免得每帧都做一次 IO。高度不再落盘（分页
+        # 模式高度由页高决定，SDD §3.1）。
         self.cfg["width"] = int(round(self.W / self.s))
-        if not self.folded:
-            self.cfg["height"] = int(round(self.H / self.s))
         self._resize_live()
 
     def _invalidate(self, now=False):
@@ -3273,8 +3491,11 @@ class Panel:
             pass
 
     def _resize_live(self):
-        """缩放过程中的轻量重排：只动视口/圆角/滚动条/列坐标，不重建整行文字。
+        """缩放过程中的轻量重排：只动列坐标/圆角，不重建整行文字。
 
+        分页模式（自选分页 T009）：滚动条重定位与 scrollable 重算已随
+        滚动条移除一并删除；vis_h 不再重写——页高锁定，横向缩放只动
+        列坐标与圆角，松手 _rebuild 后几何归位。
         宽度变化会改变各列边界，所以这里要重算 col_x 并把现存 item 挪到新
         位置（改坐标不等于重建 item）。need_hdr 翻转（列被降级掉或加回来）
         不在这里处理：那要增删列文字，交给松手后的 _rebuild。
@@ -3291,8 +3512,6 @@ class Panel:
                 self._draw_masks()
                 self.marq_schedule()      # 从超窄拖宽后恢复轮播（句柄空才排）
                 return
-            if self.vis_h != self.H - self.head_h:
-                self.vis_h = max(self.row_h, self.H - self.head_h)
             enabled = self.enabled_cols()
             vis_want, col_x_want, col_min_w, need_hdr = \
                 self.compute_columns(self.W, enabled)
@@ -3303,23 +3522,17 @@ class Panel:
             if vis_want != self.vis_cols or need_hdr != self.need_hdr:
                 col_x, self.CW = self._layout_of(self.vis_cols, self.W)
             else:
-                col_x, self.CW = col_x_want, self.W - self.SB_W
+                col_x, self.CW = col_x_want, self.W
             self.col_x, self.col_min_w = col_x, col_min_w
-            self.vis_cc = max(self.row_h, self.vis_h
-                              - (self.px(HDR_H) if self.need_hdr else 0) - self.body_r)
             self.cc_top = self.head_h + (self.px(HDR_H) if self.need_hdr else 0)
             if self.cc_win and self.cc is not None:
-                self.cv.itemconfigure(self.cc_win, width=self.CW, height=self.vis_cc)
+                self.cv.itemconfigure(self.cc_win, width=self.CW,
+                                      height=self.vis_cc)
                 self.cv.coords(self.cc_win, 0, self.cc_top)
-            if self.track_id:
-                self.cv.coords(self.track_id, self.W - self.px(9), self.cc_top,
-                               self.W - self.px(1), self.cc_top + self.vis_cc)
             self.cv.coords(self.clock, self.W - self.px(13), self.head_h / 2)
-            self.scrollable = self.need_h > self.vis_cc
             self._relayout_cols()
             # 形状随尺寸重画，最后把圆角遮罩压回最上层
             self._draw_body()
-            self.update_scrollbar()
             self.draw_amt()           # 宽度变了 → 级别在这里重判并重排
             self._draw_masks()
         except Exception as ex:
@@ -3351,8 +3564,7 @@ class Panel:
                     self.pos = {"x": cx, "y": cy}
                 save_json(POS_FILE, self.pos)
                 self.cfg["width"] = int(round(self.W / self.s))
-                if not self.folded:
-                    self.cfg["height"] = int(round(self.H / self.s))
+                # 高度不再写盘：分页模式页高恒定（自选分页 SDD §3.1）
                 save_json(CONFIG_FILE, self.cfg)
                 self._rebuild()
                 # 等 Tk 消化完新尺寸后再重绘 + 校正位置
@@ -3425,6 +3637,7 @@ class Panel:
         self.var_top.set(bool(self.root.attributes("-topmost")))
         self._refresh_col_menu()      # 每次弹出前对齐 ✓ 与实际显示列
         self._refresh_marq_menu()     # 轮播档位同理
+        self._refresh_page_menu()     # 每页条数档位同理
         self._refresh_amt_menu()      # 成交额开关同理
         # 行上下文：菜单是启动时一次构建的全局菜单，右键所在行只能在弹出前
         # 反查并写入 _menu_code；未命中行（空白区/折叠态）置灰两项（审核 P7）
@@ -3479,12 +3692,6 @@ class Panel:
             self.marq_idx = 0
         self._rebuild()
 
-    def reset_size(self):
-        """清掉手动调整的尺寸，回到「宽度用配置值、高度跟内容自适应」。"""
-        self.cfg.pop("height", None)
-        save_json(CONFIG_FILE, self.cfg)
-        self._rebuild()
-
     def watch_group(self):
         """取（或按需创建）名为「自选」的分组。"""
         groups = self.cfg.setdefault("groups", [])
@@ -3516,6 +3723,8 @@ class Panel:
         self.set_alpha(float(self.cfg.get("alpha", self.alpha)))
         # 档位也要重读，否则"编辑配置文件 -> 重新加载"对它不生效
         self.marquee_interval = self.load_marq_interval()
+        # 每页条数同理（自选分页 R-08）
+        self.page_size = self.load_page_size()
         # 成交额开关同理；关掉就释放基准，避免残留状态继续驱动绘制
         v = self.cfg.get("show_amount")
         self.show_amount = v if isinstance(v, bool) else self.show_amount
@@ -7193,6 +7402,49 @@ def selftest():
     if not (gok and wok and dok and sok and fok and cok and kk and eok and uok):
         print(f"  gold={ggot} wave={wgot} stack={stack_labels([10, 11, 25], 12)}"
               f" rec4={r4} keys={kk} eff=({eA},{eB}) undo={bw.draw}")
+
+    # ---- 自选分页：纯函数自检（无网络，R9-T010）----
+    _pg_groups = (
+        {"name": "宽基指数", "items": [{"code": f"sh{600000 + i}", "alias": f"指数{i}"}
+                                       for i in range(7)]},
+        {"name": "自选", "items": [{"code": "sz000001", "alias": None},
+                                   {"code": "", "alias": "无效代码应跳过"}]
+         + [{"code": f"sz{100000 + i}", "alias": None} for i in range(24)]},
+        {"name": "空组", "items": []},                        # 空组不产组头
+    )
+    pmeta = page_meta(list(_pg_groups))
+    p_rows = [m for m in pmeta if m[0] == "r"]
+    p_heads = [m for m in pmeta if m[0] == "h"]
+    pm_ok = (len(p_rows) == 32                       # 7 + 1 + 24（空 code 跳过）
+             and len(p_heads) == 2                   # 空组无组头
+             and p_heads[0][2] == 0 and p_heads[1][2] == 7   # owner = 首行全局行号
+             and p_rows[8][1] == ("sz100000", None))
+    ptotal = max(1, -(-len(p_rows) // 10))
+    p_lines, p_ok = [], pm_ok
+    for p in range(ptotal):
+        items, tt, pi = page_slice(pmeta, p, 10)
+        nr = len([m for m in items if m[0] == "r"])
+        p_lines.append(nr)
+        p_ok = p_ok and nr <= 10 and tt == ptotal and pi == p
+        row_owners = {m[2] for m in items if m[0] == "r"}
+        for m in items:                  # 组头必须与其首行同页（裁决 D2）
+            if m[0] == "h":
+                p_ok = p_ok and m[2] in row_owners
+    _it, _tt, _pc = page_slice(pmeta, 99, 10)     # 越界钳制到末页
+    p_ok = p_ok and _pc == ptotal - 1 and _tt == ptotal
+    _it5, _, _ = page_slice(pmeta, 0, 5)          # size 钳下限 1 与切片正确性
+    p_ok = p_ok and len([m for m in _it5 if m[0] == "r"]) == 5
+    # 选档映射（裁决 D4）：page_idx=2、size 10→15，first=20 → 20//15=1
+    first, new_size = 2 * 10, 15
+    mapped = min(first // new_size, ptotal - 1)
+    m_ok = (mapped == 1
+            and first // new_size * new_size <= first < (first // new_size + 1) * new_size)
+    print(f"[page  ] size=10 → total={ptotal}, 页行数 {p_lines} "
+          f"meta/钳制/D2同页/选档映射 "
+          f"{'OK' if p_ok and m_ok else '!! ' + str((pm_ok, p_lines, _pc, mapped))}")
+    if not (p_ok and m_ok):
+        print(f"  heads={[(m[1], m[2]) for m in p_heads]} lines={p_lines} "
+              f"clamp={_pc} mapped={mapped}")
 
     # 行业：只报告可用性，失败不影响退出码
     indie = [c for c in codes if need_industry(c)]
