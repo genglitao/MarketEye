@@ -5,7 +5,7 @@
   "topmost": true,
   "trading_refresh": 5,
   "idle_refresh": 60,
-  "width": 337,
+  "width": 291,
   "max_height": 460,
   "groups": [
     {
@@ -45,16 +45,16 @@
       "name": "自选",
       "items": [
         {
-          "code": "sh601658",
-          "alias": "邮储银行"
-        },
-        {
           "code": "sz159865",
           "alias": "养殖ETF国泰"
         },
         {
           "code": "sz159611",
           "alias": "电力ETF广发"
+        },
+        {
+          "code": "sh601658",
+          "alias": "邮储银行"
         },
         {
           "code": "sz159708",
@@ -65,8 +65,24 @@
           "alias": "创新药ETF广发"
         },
         {
+          "code": "sh603486",
+          "alias": "科沃斯"
+        },
+        {
           "code": "sh601336",
           "alias": "新华保险"
+        },
+        {
+          "code": "sh603809",
+          "alias": "豪能股份"
+        },
+        {
+          "code": "sz000799",
+          "alias": "酒鬼酒"
+        },
+        {
+          "code": "sz300182",
+          "alias": "捷成股份"
         },
         {
           "code": "sh512100",
@@ -81,28 +97,20 @@
           "alias": "中证2000ETF南方"
         },
         {
-          "code": "sz002517",
-          "alias": "恺英网络"
+          "code": "sz300488",
+          "alias": "恒锋工具"
         },
         {
-          "code": "sh512690",
-          "alias": "酒ETF鹏华"
+          "code": "sh688717",
+          "alias": "艾罗能源"
         },
         {
           "code": "sh601375",
           "alias": "中原证券"
         },
         {
-          "code": "sz000995",
-          "alias": "皇台酒业"
-        },
-        {
-          "code": "sh600216",
-          "alias": "浙江医药"
-        },
-        {
-          "code": "sh510910",
-          "alias": "上证指数ETF南方"
+          "code": "sz002517",
+          "alias": "恺英网络"
         },
         {
           "code": "sh513330",
@@ -117,8 +125,28 @@
           "alias": "高股息ETF广发"
         },
         {
-          "code": "sz000799",
-          "alias": "酒鬼酒"
+          "code": "sh512690",
+          "alias": "酒ETF鹏华"
+        },
+        {
+          "code": "sh600216",
+          "alias": "浙江医药"
+        },
+        {
+          "code": "sz000995",
+          "alias": "皇台酒业"
+        },
+        {
+          "code": "sh600809",
+          "alias": "山西汾酒"
+        },
+        {
+          "code": "sz000712",
+          "alias": "锦龙股份"
+        },
+        {
+          "code": "sz300660",
+          "alias": "江苏雷利"
         }
       ]
     }
@@ -137,7 +165,6 @@
       "turnover"
     ]
   },
-  "height": 763,
   "marquee_interval": 2,
   "show_amount": true,
   "drawings": {},
@@ -161,5 +188,6 @@
     },
     "x": 620,
     "y": 213
-  }
+  },
+  "page_size": 20
 }
