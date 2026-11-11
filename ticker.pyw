@@ -55,12 +55,15 @@ THEMES = {
         "text": "#EAEFF8", "sub": "#7E8BA1", "name": "#C3CCDC",
         "up": "#FF4D4F", "down": "#12B76A", "flat": "#95A1B4",
         "bar": "#9AA8C0",
+        # 菜单 hover 高亮（BUG-13）：必须跟主题走，硬编码深蓝在浅色主题下突兀
+        "sel": "#3B4A63", "sel_fg": "#FFFFFF",
     },
     "light": {
         "bg": "#FFFFFF", "head": "#F3F6FB", "line": "#E4E9F2",
         "text": "#1A2233", "sub": "#8592A6", "name": "#3C4658",
         "up": "#E5484D", "down": "#0E9F5E", "flat": "#7A8699",
         "bar": "#9AA8C0",
+        "sel": "#D6E2F7", "sel_fg": "#1A2233",
     },
 }
 
@@ -155,6 +158,31 @@ AMT_DAY_API = "https://web.ifzq.gtimg.cn/appstock/app/day/query"
 KLINE_FQ_API = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 KLINE_MK_API = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
 KLINE_MINUTE_API = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+
+# ---- 盘面速览（SDD §3.7.1；R10：白黄线/上证/量能/判词四段悬浮框）----
+SV_SINA_URL = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/"
+               "json_v2.php/Market_Center.getHQNodeData")
+SV_NODE = "hs_a"          # 沪深 A 股全量节点（裁决 D8：一次取全，沪市按 symbol 前缀过滤）
+SV_PAGE_NUM = 100         # 每页条数上限（接口约定，实测 56 页取全 5579 只）
+SV_PAGE_CAP = 90          # 翻页硬上限（防接口改版死循环，90 >> 实测 56）
+SV_MIN_ROWS = 1000        # 全量样本数下限（低于视为接口改版，整轮作废）
+SV_PAGE_TIMEOUT = 8       # 单页超时（秒）
+SV_PAGE_GAP = 0.03        # 页间节流（秒；56 页 ≈ +1.7 秒，降低被限流概率）
+SV_TOTAL_BUDGET = 30      # 整轮总预算（秒）：页数翻倍后单页超时最坏叠加 448 秒，须有总闸
+SV_INTERVAL = 60          # 黄线轮询间隔（秒；黄线是缓变量，60s 足够）
+SV_IDLE_CHECK = 5         # 非交易时段状态自检间隔（秒）
+SV_FAIL_LIMIT = 3         # 连续失败轮数上限（PRD R-08，约 3 分钟降级）
+SV_TH_STICK = 0.05        # 白黄粘合阈值（%，PRD R-01，可调）
+SV_TH_SH = 0.05           # 上证涨/平/跌子判定阈值（%，PRD R-10，可调）
+SV_AMT_TH = 5.0           # 量能放缩阈值（%，PRD R-02，与主窗成交额块同源口径）
+SV_AMT_ZERO = 5e6         # 差额绝对值 < 0.05 亿 → 「→0.0亿」（R-12 噪声钳制）
+SV_H = 30                 # 悬浮框高度（逻辑像素）
+SV_GAP = 10               # 段间距（逻辑像素）
+SV_YIELD_MS = 250         # 截图让位检测间隔（BUG-10）
+SV_TIP_DELAY = 300        # 悬停明细浮层延时（毫秒，R-13）
+# 定宽测量的最坏样本（§3.5：与当日数据无关，块宽恒定不随内容伸缩）
+SV_WORST = {"bw": "黄▼白 -9.9%", "sh": "沪 39999.99 +9.99%",
+            "amt": "↓-1.20万亿", "vd": "平量·权重领跌", "closed": "休市"}
 
 # ---- K 线窗口（SDD §3.7.1；第二轮 2026-10-30：10 档 / 6 均线 / MACD / 分时）----
 KLINE_DEF_W, KLINE_DEF_H = 880, 640   # 默认窗口尺寸（逻辑像素）
@@ -425,6 +453,99 @@ def page_slice(meta, page, size):
     page = min(max(int(page), 0), total - 1)
     lo, hi = page * size, page * size + size
     return ([m for m in meta if lo <= m[2] < hi], total, page)
+
+
+def sv_yellow_mean(rows):
+    """沪市全量涨跌幅列表 → 等权平均（%）（盘面速览 T002，黄线口径）。
+
+    一股一票：每只股票对均值的贡献权重相同（同花顺「上证领先」的现代实现）。
+    空串/非法值按 0 计（停牌等权贡献 0，与领先指数口径一致）；空列表返回 None。
+    """
+    vals = []
+    for r in rows:
+        try:
+            vals.append(float(r))
+        except (TypeError, ValueError):
+            vals.append(0.0)
+    return sum(vals) / len(vals) if vals else None
+
+
+def sv_updown(rows):
+    """沪深全量 rows → 涨跌家数（R-14 / T013，纯函数）。
+
+    按 symbol 前缀分市场：`sh` / `sz` 计入，`bj`（北交所）一律忽略（裁决 D9）。
+    changepercent > 0 记涨、< 0 记跌、其余（0 / 空串 / 停牌）记平——与黄线
+    「空值按 0 计」同一口径。空 rows 返回 None（整段降级为「—」）。
+    """
+    if not rows:
+        return None
+    st = {"up": 0, "dn": 0, "flat": 0,
+          "up_sh": 0, "dn_sh": 0, "up_sz": 0, "dn_sz": 0}
+    for r in rows:
+        sym = str(r.get("symbol") or "")
+        if sym.startswith("sh"):
+            m = "sh"
+        elif sym.startswith("sz"):
+            m = "sz"
+        else:
+            continue                     # bj / 异常代码：不入任何口径
+        try:
+            v = float(r.get("changepercent"))
+        except (TypeError, ValueError):
+            v = 0.0                      # 停牌等空值计平盘
+        k = "up" if v > 0 else ("dn" if v < 0 else "flat")
+        st[k] += 1
+        if k != "flat":
+            st[f"{k}_{m}"] += 1
+    return st
+
+
+def sv_amt_diff_text(diff):
+    """量能差额（元）→ 「↑+388亿」/「↓-388亿」/「→0.0亿」（R-12 / T013）。
+
+    箭头语义与主窗成交额块 `_amt_diff_parts` 一致；None → 「—」。
+    绝对值不足 SV_AMT_ZERO 按持平处理——避免「↑+0.0亿」这种噪声形态。
+    """
+    if diff is None:
+        return PLACEHOLDER_NA
+    if abs(diff) < SV_AMT_ZERO:
+        return "→0.0亿"
+    return ("↑" if diff > 0 else "↓") + fmt_signed_amount(diff)
+
+
+def sv_verdict(pct_sh, yellow, amt_pct):
+    """三段判定值 → 综合判词短语（T002，裁决 D4 封闭枚举）。
+
+    量能词（放量/平量/缩量，阈值 ±SV_AMT_TH）· 结构词（PRD R-10 矩阵，
+    3×3=9 格，由上证涨跌子判定与白黄差值交叉得出）。任一入参 None → None
+    （判词依赖三段，任一失效即降级，PRD R-04）。
+    """
+    if pct_sh is None or yellow is None or amt_pct is None:
+        return None
+    if amt_pct >= SV_AMT_TH:
+        amt = "放量"
+    elif amt_pct <= -SV_AMT_TH:
+        amt = "缩量"
+    else:
+        amt = "平量"
+    diff = pct_sh - yellow
+    if pct_sh > SV_TH_SH:
+        if diff > SV_TH_STICK:
+            struct = "二八行情"
+        elif diff < -SV_TH_STICK:
+            struct = "普涨"
+        else:
+            struct = "同步上涨"
+    elif pct_sh < -SV_TH_SH:
+        if diff > SV_TH_STICK:
+            struct = "权重抗跌"
+        elif diff < -SV_TH_STICK:
+            struct = "权重领跌"
+        else:
+            struct = "普跌"
+    else:
+        struct = "盘整"
+    return f"{amt}·{struct}"
 
 
 def is_trading(now=None):
@@ -951,6 +1072,51 @@ def fetch_minute(sym):
             "date": str(inner.get("date") or "")}
 
 
+def fetch_sina_hs():
+    """新浪行情列表分页拉取沪深全部 A 股（T013，daemon 专用）。
+
+    分页约定（SDD §3.2.1）：num=100 顺序拉取，直到返回数组长度 < 100；
+    返回 `[{symbol, changepercent}, ...]` 原始行——沪市样本由调用方按
+    symbol 前缀过滤求黄线均值（口径与原 sh_a 节点一致，实测同为 2318 只），
+    全量行交 sv_updown 统计家数，两者同批产出（AC-29）。
+    整轮作废语义（PRD M-01）：任一页超时/非 200/JSON 坏/翻页超上限/超整轮
+    预算/样本数低于 SV_MIN_ROWS 一律抛异常——部分样本不得冒充全量。
+    只许 daemon 线程调用。
+    """
+    out = []
+    page = 1
+    t0 = time.time()
+    while True:
+        if time.time() - t0 > SV_TOTAL_BUDGET:
+            raise RuntimeError(f"sv 整轮超预算（已取 {len(out)} 条）")
+        url = (f"{SV_SINA_URL}?page={page}&num={SV_PAGE_NUM}"
+               f"&sort=symbol&asc=1&node={SV_NODE}")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://finance.sina.com.cn/",
+        })
+        with urllib.request.urlopen(req, timeout=SV_PAGE_TIMEOUT) as resp:
+            if getattr(resp, "status", 200) != 200:
+                raise RuntimeError(f"sv page {page} http {resp.status}")
+            raw = resp.read().decode("utf-8", errors="ignore")
+        arr = json.loads(raw)          # 返回为 ASCII 转义 JSON，直解
+        if not isinstance(arr, list):
+            raise RuntimeError(f"sv page {page} 非 JSON 数组")
+        for r in arr:
+            if isinstance(r, dict):
+                out.append({"symbol": str(r.get("symbol") or ""),
+                            "changepercent": r.get("changepercent")})
+        if len(arr) < SV_PAGE_NUM:
+            break
+        page += 1
+        if page > SV_PAGE_CAP:
+            raise RuntimeError("sv 翻页超上限")
+        time.sleep(SV_PAGE_GAP)        # 页间节流：56 页连打容易被限流
+    if len(out) < SV_MIN_ROWS:
+        raise RuntimeError(f"sv 样本数 {len(out)} 可疑")
+    return out
+
+
 def _macd_step(st, c):
     """MACD EMA 递推一步：st=(ef,es,ed) 为上一状态（None 表示首根）。
 
@@ -1355,7 +1521,9 @@ class Panel:
         self.stop = False
         self.data = {}
         self.err = None
-        self.folded = False
+        # 折叠态（用户口径 2026-11-11）：启动默认折叠成标题栏，不默认展开；
+        # 读 config["folded"] 记住上次状态，缺键按折叠处理（老配置也升级为折叠启动）
+        self.folded = bool(self.cfg.get("folded", True))
         self.rows = []      # [(code, alias, {列键: item_id})]
         self.hit = []       # [(y0, y1, code)]
         self.dlg = None     # 自选管理面板
@@ -1406,6 +1574,15 @@ class Panel:
         self.page_size = self.load_page_size()
         self.page_idx = 0
         self.pg_prev_id = self.pg_next_id = self.pg_label_id = None
+
+        # 盘面速览状态（R10）：sview 隐藏即销毁（D7）；sv_yellow/sv_fails
+        # 只由 poll 写入（线程边界，与 ind/amt 同纪律）；worker 随开启创建
+        self.sview = None
+        self.sv_yellow = None
+        self.sv_ud = None           # 涨跌家数字典（v1.1.0，与 sv_yellow 同轮落地）
+        self.sv_fails = 0
+        self.sv_thread = None
+        self.sv_closed_shot = False
 
         # 列状态：先加载配置，菜单才能取到正确的初始勾选态
         self.col_order = list(COL_KEYS)
@@ -1460,6 +1637,8 @@ class Panel:
         self.root.after(250, self.poll)
         self.root.after(1000, self._tick)
         self.root.after(120, self.center_first)
+        if self.cfg.get("sview_on"):
+            self.toggle_sview(True)   # 启动即恢复上次显隐态（worker 随之创建）
 
     # ---------- 尺寸 ----------
     def px(self, v):
@@ -2561,24 +2740,47 @@ class Panel:
             except Exception:
                 pass
 
+    def _mk_menu(self, parent):
+        """建一个与本项目主题一致的菜单（BUG-13）。
+
+        三条颜色必须显式给：`activebackground/activeforeground` 原本硬编码
+        深蓝，浅色主题下与菜单底反差突兀；`disabledforeground` 原本走系统默认
+        灰，在深色菜单底上糊成一团（「查看K线」「在浏览器打开」在空白区右键
+        时正是 disabled 态，用户看到的就是它）。统一按主题取色。
+        """
+        t = self.theme
+        return tk.Menu(parent, tearoff=0, bg=t["head"], fg=t["text"],
+                       activebackground=t["sel"], activeforeground=t["sel_fg"],
+                       disabledforeground=t["sub"],
+                       bd=0, font=(self.f_cn, 9))
+
+    def _menu_cmd(self, m, label, command, **kw):
+        """加一个普通菜单项，统一挂透明占位图（BUG-13）。
+
+        Windows 上同一菜单里「带 image 的项」与「纯文字项」走两条绘制路径：
+        带图的走 Tk 自绘（文字实、颜色准），纯文字的交回系统绘制（深色底上
+        文字偏灰发虚、hover 底色也不跟 activebackground）。全项目菜单都用
+        对勾位图，其余项只要挂一张同尺寸全透明图即可并入自绘路径，顺带获得
+        统一的 16px 文字缩进对齐。separator / checkbutton 不适用。
+        """
+        m.add_command(label=label, image=self.img_chk_off, compound="left",
+                      command=command, **kw)
+
     def _build_menu(self):
         t = self.theme
-        m = tk.Menu(self.root, tearoff=0, bg=t["head"], fg=t["text"],
-                    activebackground="#3B4A63", activeforeground="#FFFFFF",
-                    bd=0, font=(self.f_cn, 9))
+        # 对勾位图必须先于任何菜单项创建：普通项要挂透明占位图（_menu_cmd）
+        self._mk_check_imgs()
+        m = self._mk_menu(self.root)
 
-        m.add_command(label="立即刷新", command=self.wake.set)
+        self._menu_cmd(m, "立即刷新", self.wake.set)
         m.add_separator()
 
         # 显示列：5 个可隐藏列。不用 checkbutton（Windows 上勾选标记颜色
         # 跟随 selectcolor 默认黑，深色菜单下看不见），也不用文本前缀 √
         # （符号字符被按暗色渲染）；用白色对勾 PhotoImage，颜色恒可控。
         # 隐藏列挂全透明同尺寸占位图，保证各菜单项文字左对齐一致。
-        cm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
-                     activebackground="#3B4A63", activeforeground="#FFFFFF",
-                     font=(self.f_cn, 9))
+        cm = self._mk_menu(m)
         self.menu_cols = cm
-        self._mk_check_imgs()
         self.col_entry = {}
         for k in HIDE_ORDER:
             shown = k not in self.col_hidden
@@ -2593,9 +2795,7 @@ class Panel:
 
         # 轮播间隔：同一套白色对勾位图。索引必须从子菜单对象取
         # （mm.index("end")），取父菜单会指到别的项上。
-        mm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
-                     activebackground="#3B4A63", activeforeground="#FFFFFF",
-                     font=(self.f_cn, 9))
+        mm = self._mk_menu(m)
         self.menu_marq = mm
         self.marq_entry = {}
         for sec in MARQ_INTERVAL_CHOICES:
@@ -2608,9 +2808,7 @@ class Panel:
         m.add_cascade(label="轮播间隔", menu=mm)
 
         # 每页条数（自选分页 F-03）：同一套白色对勾位图与索引机制
-        pm = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
-                     activebackground="#3B4A63", activeforeground="#FFFFFF",
-                     font=(self.f_cn, 9))
+        pm = self._mk_menu(m)
         self.menu_page = pm
         self.page_entry = {}
         for n_ in PAGE_SIZES:
@@ -2629,30 +2827,35 @@ class Panel:
                       command=lambda: self.set_show_amount(not self.show_amount))
         self.amt_menu_idx = m.index("end")
 
-        op = tk.Menu(m, tearoff=0, bg=t["head"], fg=t["text"],
-                     activebackground="#3B4A63", activeforeground="#FFFFFF",
-                     font=(self.f_cn, 9))
+        # 盘面速览开关（R10）：同款白色对勾位图
+        m.add_command(label="盘面速览",
+                      image=self.img_chk_on if self.cfg.get("sview_on") else self.img_chk_off,
+                      compound="left",
+                      command=lambda: self.toggle_sview())
+        self.sview_menu_idx = m.index("end")
+
+        op = self._mk_menu(m)
         for pct in (100, 94, 85, 70):
-            op.add_command(label=f"{pct}%", command=lambda p=pct: self.set_alpha(p / 100))
+            self._menu_cmd(op, f"{pct}%", lambda p=pct: self.set_alpha(p / 100))
         m.add_cascade(label="不透明度", menu=op)
 
         self.var_top = tk.BooleanVar(value=bool(self.cfg.get("topmost", True)))
         m.add_checkbutton(label="窗口置顶", variable=self.var_top, command=self.toggle_top)
 
-        m.add_command(label="折叠 / 展开", command=self.toggle_fold)
+        self._menu_cmd(m, "折叠 / 展开", self.toggle_fold)
         # 行上下文两项：state 由 on_menu 每次弹出前按命中行动态置位/置灰
-        m.add_command(label="查看K线", command=self._menu_kline)
+        self._menu_cmd(m, "查看K线", self._menu_kline)
         self.kline_menu_idx = m.index("end")
-        m.add_command(label="在浏览器打开", command=self._menu_open_web)
+        self._menu_cmd(m, "在浏览器打开", self._menu_open_web)
         self.web_menu_idx = m.index("end")
         m.add_separator()
-        m.add_command(label="管理自选…", command=self.open_watchlist)
-        m.add_command(label="编辑配置文件", command=self.open_config)
-        m.add_command(label="重新加载配置", command=self.reload)
+        self._menu_cmd(m, "管理自选…", self.open_watchlist)
+        self._menu_cmd(m, "编辑配置文件", self.open_config)
+        self._menu_cmd(m, "重新加载配置", self.reload)
         self.var_auto = tk.BooleanVar(value=self.auto_start_on())
         m.add_checkbutton(label="开机自动启动", variable=self.var_auto, command=self.toggle_auto)
         m.add_separator()
-        m.add_command(label="退出", command=self.quit)
+        self._menu_cmd(m, "退出", self.quit)
         return m
 
     # ---------- 界面绘制 ----------
@@ -3231,6 +3434,28 @@ class Panel:
                                                  "err": "network"})
                         except Exception as ex:
                             self._dbg(f"kline err 处理异常: {ex!r}")
+                    elif kind == "sv":
+                        # 独立 try：黄线落地失败绝不影响行情/成交额
+                        try:
+                            self._sv_apply(payload)
+                        except Exception as ex:
+                            self._dbg(f"sv apply 异常: {ex!r}")
+                    elif kind == "sv_err":
+                        try:
+                            self.sv_fails += 1
+                            if self.sv_fails >= SV_FAIL_LIMIT:
+                                # 连续 3 轮降级（R-08）：黄线与家数一并转「—」
+                                self.sv_yellow = None
+                                self.sv_ud = None
+                        except Exception as ex:
+                            self._dbg(f"sv err 处理异常: {ex!r}")
+                    elif kind == "sv_closed":
+                        try:
+                            self.sv_closed_shot = bool(payload)
+                            if self.sview is not None and self.sview._alive():
+                                self.sview.set_closed(self.sv_closed_shot)
+                        except Exception as ex:
+                            self._dbg(f"sv closed 处理异常: {ex!r}")
                     else:
                         self.err = payload
                         self.paint()
@@ -3639,6 +3864,7 @@ class Panel:
         self._refresh_marq_menu()     # 轮播档位同理
         self._refresh_page_menu()     # 每页条数档位同理
         self._refresh_amt_menu()      # 成交额开关同理
+        self._refresh_sview_menu()    # 盘面速览开关同理
         # 行上下文：菜单是启动时一次构建的全局菜单，右键所在行只能在弹出前
         # 反查并写入 _menu_code；未命中行（空白区/折叠态）置灰两项（审核 P7）
         code = None
@@ -3670,6 +3896,102 @@ class Panel:
         self.root.attributes("-topmost", v)
         self.cfg["topmost"] = v
         save_json(CONFIG_FILE, self.cfg)
+        if self.sview is not None:
+            self.sview.sync_top()     # 置顶联动即时生效（tick 每秒兜底比对）
+
+    # ---------- 盘面速览（R10 T005/T006/T007） ----------
+    def toggle_sview(self, on=None):
+        """显隐盘面速览悬浮框：隐藏即销毁（裁决 D7），worker 随开启创建。"""
+        if on is None:
+            on = self.sview is None
+        self.cfg["sview_on"] = bool(on)
+        save_json(CONFIG_FILE, self.cfg)
+        if on:
+            if self.sview is None or not self.sview._alive():
+                self.sview = SView(self)
+            self._sv_start_worker()
+        else:
+            sv, self.sview = self.sview, None
+            if sv is not None:
+                try:
+                    sv.win.destroy()
+                except Exception:
+                    pass
+
+    def _refresh_sview_menu(self):
+        """弹出菜单前对齐「盘面速览」对勾与实际显隐态。"""
+        try:
+            self.menu.entryconfigure(
+                self.sview_menu_idx,
+                image=(self.img_chk_on if self.cfg.get("sview_on")
+                       else self.img_chk_off))
+        except Exception:
+            pass
+
+    def _sv_start_worker(self):
+        if self.sv_thread is not None and self.sv_thread.is_alive():
+            return                    # 隐藏后 5 秒内重开：旧线程醒来自然续跑
+        self.sv_thread = threading.Thread(target=self._sv_worker, daemon=True)
+        self.sv_thread.start()
+
+    def _sv_worker(self):
+        """黄线轮询 daemon（T007，链路 2/4）：交易时段 60 秒/轮；非交易
+        时段 5 秒自检、收盘边沿最后一轮定格后空转不请求；循环条件含
+        sview_on——隐藏即自然退出（D7）。异常全包不退出。"""
+        next_poll = 0.0
+        while not self.stop and self.cfg.get("sview_on"):
+            try:
+                if is_trading():
+                    if time.time() >= next_poll:
+                        try:
+                            self._sv_round()
+                            if self.sv_closed_shot:
+                                self.q.put(("sv_closed", False))
+                        except Exception as ex:
+                            self.q.put(("sv_err", str(ex)))
+                        next_poll = time.time() + SV_INTERVAL
+                elif not self.sv_closed_shot:
+                    # 收盘边沿（R-05）：最后一轮定格 + 「休市」标记，之后空转
+                    try:
+                        self._sv_round()
+                    except Exception as ex:
+                        self._dbg(f"sv 收盘定格 {ex!r}")
+                    self.q.put(("sv_closed", True))
+                    next_poll = 0.0
+                time.sleep(SV_IDLE_CHECK)
+            except Exception as ex:
+                self._dbg(f"sv worker {ex!r}")
+                time.sleep(SV_IDLE_CHECK)
+
+    def _sv_round(self):
+        """取一轮沪深全量：黄线均值与涨跌家数同批产出（AC-29）。
+
+        沪市样本按 symbol 前缀 sh 过滤（口径与原 sh_a 节点一致，实测 2318 只）；
+        家数用全量（bj 由 sv_updown 内部忽略，裁决 D9）。同一批 rows 派生两个
+        结果，天然不会出现「黄线新、家数旧」。
+        """
+        rows = fetch_sina_hs()
+        sh_vals = [r.get("changepercent") for r in rows
+                   if str(r.get("symbol") or "").startswith("sh")]
+        stats = sv_updown(rows)
+        if stats is not None:
+            stats["at"] = datetime.now().strftime("%H:%M")
+        mean = sv_yellow_mean(sh_vals)
+        if mean is None and stats is None:
+            raise RuntimeError("sv 空样本")
+        self.q.put(("sv", (mean, stats)))
+
+    def _sv_apply(self, payload):
+        """黄线与家数落地（链路 2）：成功清零失败计数（R-09 自动恢复）。"""
+        if isinstance(payload, tuple):
+            mean, stats = (payload + (None, None))[:2]
+        else:
+            mean, stats = payload, None      # 兼容旧单值载荷
+        if mean is not None:
+            self.sv_yellow = mean
+        if stats is not None:
+            self.sv_ud = stats
+        self.sv_fails = 0
 
     def _rebuild(self):
         """重建画布并重绑事件（折叠/换肤/重载配置都会走这里）。"""
@@ -3682,6 +4004,9 @@ class Panel:
 
     def toggle_fold(self):
         self.folded = not self.folded
+        # 落盘记住折叠态：下次启动按上次的样子起来（缺键默认折叠）
+        self.cfg["folded"] = self.folded
+        save_json(CONFIG_FILE, self.cfg)
         self.marq_cancel()
         self._amt_tip_hide()          # 折叠/展开会改块的位置，浮层先撤
         if self.folded:
@@ -3731,6 +4056,8 @@ class Panel:
         if not self.show_amount:
             self.amt_base = None
             self.amt_level = "L2"
+        # 盘面速览显隐同理：sview_on 重读后对齐窗口与 worker（R10 T005）
+        self.toggle_sview(bool(self.cfg.get("sview_on")))
         self._rebuild()
         # 主题可能变了：菜单颜色与对勾位图要按新主题重画（_build_menu
         # 会顺带重建 img_chk_*，旧菜单对象整体替换，无引用残留）
@@ -3798,6 +4125,597 @@ class Panel:
 
     def run(self):
         self.root.mainloop()
+
+
+# ---------------------------------------------------------------- 截图让位探测
+_FF_PROBE = None
+# Shell 系统窗口类名（Windows 固定）：桌面（Progman/WorkerW）与任务栏矩形都
+# 铺满/贴边整屏，且 pid 必非本进程——点一下桌面空白，前台就会切成 Progman，
+# 不排除会被误判成截图遮罩导致悬浮框凭空消失（BUG-12）。类名与进程名不同，
+# 是系统契约、不会随版本改。
+_FF_SHELL_CLASSES = frozenset((
+    "Progman", "WorkerW",                     # 桌面
+    "Shell_TrayWnd", "Shell_SecondaryTrayWnd",  # 主/副屏任务栏
+))
+
+
+def _ff_make():
+    """构建「前台是否被别的进程全屏窗口占着」探针（argtypes 只设一次）。
+
+    句柄参与 ctypes 调用必须设 argtypes/restype（项目铁律），否则句柄
+    > 2^31 时抛 OverflowError 被 except 吞成幽灵 bug。
+    """
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.GetForegroundWindow.argtypes = []
+    u.GetForegroundWindow.restype = wintypes.HWND
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                           ctypes.POINTER(wintypes.DWORD)]
+    u.GetWindowThreadProcessId.restype = wintypes.DWORD
+    u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u.GetWindowRect.restype = wintypes.BOOL
+    u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, ctypes.c_int]
+    u.GetClassNameW.restype = ctypes.c_int
+    u.GetSystemMetrics.argtypes = [ctypes.c_int]
+    u.GetSystemMetrics.restype = ctypes.c_int
+    me = os.getpid()
+    cls_buf = ctypes.create_unicode_buffer(256)
+
+    def probe():
+        hwnd = u.GetForegroundWindow()
+        if not hwnd:
+            return False
+        # Shell 桌面/任务栏先行排除（BUG-12）：它们几何上铺满整屏但绝不是遮罩
+        if u.GetClassNameW(hwnd, cls_buf, 256):
+            if cls_buf.value in _FF_SHELL_CLASSES:
+                return False
+        pid = wintypes.DWORD(0)
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == me:
+            return False                     # 自己人（拖动 / 右键菜单）不算
+        r = wintypes.RECT()
+        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
+            return False
+        # 虚拟屏范围（多显示器成立；窗口坐标与 GetSystemMetrics 同受 DPI 虚拟化）
+        vx, vy = u.GetSystemMetrics(76), u.GetSystemMetrics(77)
+        vw, vh = u.GetSystemMetrics(78), u.GetSystemMetrics(79)
+        if vw <= 0 or vh <= 0:
+            return False
+        return (r.left <= vx + 1 and r.top <= vy + 1
+                and r.right >= vx + vw - 1 and r.bottom >= vy + vh - 1)
+
+    return probe
+
+
+def foreign_fullscreen():
+    """True = 前台铺满整屏且不属于本进程（截图遮罩 / 录屏 / 全屏播放）。
+
+    只按几何判定、不认进程名：截图工具各版本进程名不一（SnippingTool、
+    ScreenClippingHost、Snipaste、微信…），认名必漏，认几何不会。
+    """
+    global _FF_PROBE
+    if _FF_PROBE is None:
+        try:
+            _FF_PROBE = _ff_make()
+        except Exception:
+            _FF_PROBE = lambda: False
+    try:
+        return bool(_FF_PROBE())
+    except Exception:
+        return False
+
+
+class SView:
+    """盘面速览悬浮框（R10 T004/T007/T008）：单行四段 + 休市标记。
+
+    无边框 Toplevel，矩形+边框不做圆角色键（裁决 D2，规避项目圆角血泪史）。
+    定宽按最坏样本测量（含休市段），tick 每秒只 itemconfig 改字改色；
+    数据刷新单一链（裁决 D6）：四段数值统一由本类 tick 读主窗状态完成，
+    Panel._tick 不介入。位置记忆 sview_x/y；出屏自动收回（M-03）。
+    """
+
+    def __init__(self, app):
+        self.app = app
+        t = self.theme = app.theme
+        self.closed = False          # 收盘定格标记（sv_closed 事件置位）
+        self.win = tk.Toplevel(app.root)
+        self.win.overrideredirect(True)
+        self.win.configure(bg=t["head"], highlightthickness=1,
+                           highlightbackground=t["line"])
+        self.cv = tk.Canvas(self.win, bg=t["head"], highlightthickness=0, bd=0)
+        self.cv.pack(fill="both", expand=True)
+        self.f_cn = tkfont.Font(family=app.f_cn, size=9)
+        self.f_num = tkfont.Font(family=app.f_num, size=9, weight="bold")
+        self.f_s = tkfont.Font(family=app.f_cn, size=8)
+        # 定宽：五段最坏样本 + 4×段间距 + 左右内边距（审核 M6：休市段必须计入）
+        pad, gap = self.px(10), self.px(SV_GAP)
+        samples = ((self.f_cn, SV_WORST["bw"]), (self.f_num, SV_WORST["sh"]),
+                   (self.f_cn, SV_WORST["amt"]), (self.f_cn, SV_WORST["vd"]),
+                   (self.f_s, SV_WORST["closed"]))
+        self.W = pad * 2 + gap * 4 + sum(f.measure(s) for f, s in samples)
+        self.H = self.px(SV_H)
+        x, y = app.cfg.get("sview_x"), app.cfg.get("sview_y")
+        if not isinstance(x, int) or not isinstance(y, int):
+            # 缺省位：主窗正下方（R-06）
+            x = app.root.winfo_x()
+            y = app.root.winfo_y() + app.root.winfo_height() + self.px(8)
+        x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
+        # overrideredirect 窗口 geometry 必须带尺寸（均线面板先例实测）
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self._layout(pad, gap)
+        # 拖动与右键：整窗即热区（四段文字不单独绑事件）
+        self._dx = self._dy = 0
+        self._dragging = False
+        self._yielded = False        # 截图让位中（BUG-10）
+        # 悬停明细浮层（R-13）：单 Toplevel 复用两种模板（裁决 D10）
+        self.tip = None
+        self.tip_cv = None
+        self._tip_kind = None        # 当前模板：None / "bw" / "amt"
+        self._tip_after = None       # 300ms 延时句柄
+        self._tip_slot = None        # 指针当前所在热区（变化才重启延时）
+        self._tip_rows = None       # 最近一次绘制内容（不变则不重绘，避免闪烁）
+        for w in (self.win, self.cv):
+            w.bind("<Button-1>", self.press)
+            w.bind("<B1-Motion>", self.drag)
+            w.bind("<ButtonRelease-1>", self.drop)
+            w.bind("<Button-3>", self.menu)
+            w.bind("<Motion>", self.motion)
+            w.bind("<Leave>", self.leave)
+        self.win.update()            # 先完成首次映射再置顶（先例：grab 前置条件）
+        self.sync_top()
+        self.win.lift()
+        self._yield_tick()           # 截图让位检测链（自带 after 续期）
+        self.tick()
+
+    def px(self, v):
+        return int(round(v * self.app.s))
+
+    # ---------- 渲染 ----------
+    def _layout(self, pad, gap):
+        """按定宽槽位排布各段文字（只建一次，tick 后续只 itemconfig）。"""
+        t = self.theme
+        c = self.cv
+        y = self.H // 2
+        w_bw = self.f_cn.measure(SV_WORST["bw"])
+        w_sh = self.f_num.measure(SV_WORST["sh"])
+        w_amt = self.f_cn.measure(SV_WORST["amt"])   # R-12：量能段单 text
+        x1 = pad
+        x2 = x1 + w_bw + gap
+        x3 = x2 + w_sh + gap
+        x4 = x3 + w_amt + gap
+        self.ids = {
+            "bw": c.create_text(x1, y, anchor="w", text=PLACEHOLDER_NA,
+                                fill=t["flat"], font=self.f_cn),
+            "sh_lab": c.create_text(x2, y, anchor="w", text="沪",
+                                    fill=t["sub"], font=self.f_cn),
+            "sh_val": c.create_text(x2 + self.f_cn.measure("沪 "), y, anchor="w",
+                                    text=PLACEHOLDER_NA, fill=t["flat"],
+                                    font=self.f_num),
+            "amt": c.create_text(x3, y, anchor="w", text=PLACEHOLDER_NA,
+                                 fill=t["flat"], font=self.f_cn),
+            "vd": c.create_text(x4, y, anchor="w", text=PLACEHOLDER_NA,
+                                fill=t["flat"], font=self.f_cn),
+            "closed": c.create_text(self.W - pad, y, anchor="e", text="",
+                                    fill=t["flat"], font=self.f_s),
+        }
+        # 悬停热区（R-13）：白黄线段 / 量能段的横向区间（画布坐标），
+        # 上证段与判词段不响应。右端取下一段起点减半个间隔，避免热区相接。
+        self.hot = {"bw": (x1, x2 - gap), "amt": (x3, x4 - gap)}
+
+    def _recolor(self):
+        """主题变更：槽位与 id 体系不变，只整批刷色重填（render 轻量版）。"""
+        t = self.theme
+        self.cv.configure(bg=t["head"])
+        self.win.configure(bg=t["head"], highlightbackground=t["line"])
+        self._fill()
+
+    def _fill(self):
+        """四段数据填充（链路 3）：读主窗状态 → 判定 → itemconfig。"""
+        app, t = self.app, self.theme
+        ids = self.ids
+        # 白黄线段：白=上证涨跌幅，黄=等权均值（app.sv_yellow 由 poll 落地）
+        sh = app.data.get("sh000001") or {}
+        pct = sh.get("pct")
+        price = sh.get("price")
+        yellow = app.sv_yellow
+        if pct is not None and yellow is not None:
+            # 顺序固定「黄 → 白」，箭头指向黄线的位置，差值按「黄 − 白」带符号
+            # （符号与箭头同向）：黄▲白 = 黄在上、白在下 —— 小票强于权重，
+            # 个股体感好，属理想盘面 → 红；黄▼白 = 权重独强（二八行情，
+            # 赚指数不赚钱）→ 绿。用户 2026-11-11 口径，与涨跌色语义一致。
+            d = yellow - pct
+            if d > SV_TH_STICK:
+                bw_txt, bw_col = f"黄▲白 {d:+.1f}%", t["up"]
+            elif d < -SV_TH_STICK:
+                bw_txt, bw_col = f"黄▼白 {d:+.1f}%", t["down"]
+            else:
+                bw_txt, bw_col = "黄≈白", t["flat"]      # 粘合不显差值（R-01）
+        else:
+            bw_txt, bw_col = PLACEHOLDER_NA, t["flat"]
+        # 上证段：price/pct 复用主窗行情（零新增请求；show_amount 关闭则缺数据降级）
+        if price and pct is not None:
+            sh_txt = f"{price:.2f} {pct:+.2f}%"
+            sh_col = t["up"] if pct > 0 else (t["down"] if pct < 0 else t["flat"])
+        else:
+            sh_txt, sh_col = PLACEHOLDER_NA, t["flat"]
+        # 量能段：差额展示（R-12，与主窗成交额块差额段同款），判定仍用比例。
+        # 时段与分钟轴必须自己推导（calc_amt_state 是纯推导、无副作用）：
+        #   ① 不能依赖 draw_amt 顺手写下的 amt_state —— 窗口过窄（L2）或折叠时
+        #      draw_amt 提前返回，amt_state 会永远停在初始 "S1"，比例恒为 None，
+        #      量能段与判词段双双显示「—」；
+        #   ② 不传 axis 时 S2 分支退回 series[0]（昨日 09:30 的累计额），
+        #      基准小一个数量级，比例会虚高到几千 %（实测 +2919%）。
+        _st, _ax, _note = app.calc_amt_state()
+        _total, _base, adiff, apct, _label = app._amt_values(_st, _ax)
+        if adiff is None:
+            amt_txt, amt_col = PLACEHOLDER_NA, t["flat"]
+        elif adiff >= SV_AMT_ZERO:
+            amt_txt, amt_col = sv_amt_diff_text(adiff), t["up"]
+        elif adiff <= -SV_AMT_ZERO:
+            amt_txt, amt_col = sv_amt_diff_text(adiff), t["down"]
+        else:
+            amt_txt, amt_col = "→0.0亿", t["flat"]
+        # 判词段：封闭枚举纯函数（任一段 None 即 None）
+        vd = sv_verdict(pct, yellow, apct)
+        vd_txt = vd or PLACEHOLDER_NA
+        cfg = (("bw", bw_txt, bw_col), ("sh_val", sh_txt, sh_col),
+               ("amt", amt_txt, amt_col), ("vd", vd_txt, t["flat"]))
+        for key, txt, col in cfg:
+            ids[key] and self.cv.itemconfig(ids[key], text=txt, fill=col)
+        ids["closed"] and self.cv.itemconfig(
+            ids["closed"], text="休市" if self.closed else "")
+
+    # ---------- 1 秒统一刷新（裁决 D6） ----------
+    def tick(self):
+        if not self._alive():
+            return
+        try:
+            top = bool(self.app.cfg.get("topmost", True))
+            try:
+                if bool(self.win.attributes("-topmost")) != top:
+                    self.win.attributes("-topmost", top)
+            except Exception:
+                pass
+            if self.app.theme is not self.theme:
+                self.theme = self.app.theme
+                self._recolor()
+            if not self.closed:               # 收盘定格：数值已停，只比对主题/置顶
+                self._fill()
+            if self.tip is not None:          # 浮层数值跟随刷新（内容未变不重绘）
+                self._tip_fill()
+        except Exception:
+            pass
+        try:
+            self.win.after(1000, self.tick)
+        except Exception:
+            pass
+
+    def set_closed(self, on):
+        """收盘态边沿（sv_closed 事件）：行尾「休市」标记显隐。
+
+        置位时补一次 _fill：worker 把最后一轮 ("sv") 与 ("sv_closed") 紧挨着
+        压进队列，poll 同批消费后 closed 已置位，而 tick 在 closed 期间跳过
+        _fill —— 终值就永远渲不出来（判词段恒「—」）。这里补一次即定格。
+        """
+        self.closed = bool(on)
+        if self._alive():
+            self.cv.itemconfig(self.ids["closed"],
+                               text="休市" if self.closed else "")
+            self._fill()
+
+    def sync_top(self):
+        try:
+            self.win.attributes("-topmost",
+                                bool(self.app.cfg.get("topmost", True)))
+        except Exception:
+            pass
+
+    def _alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except Exception:
+            return False
+
+    # ---------- 截图让位（BUG-10） ----------
+    def _yield_tick(self):
+        """前台被别的进程的全屏窗口盖住时隐藏，解除后原样恢复。
+
+        截图工具（Win+Shift+S 覆盖层、Snipaste、微信/QQ 截图）都会铺一层全屏
+        遮罩；本窗是独立置顶 Toplevel，会浮在遮罩之上挡住选区与工具条。
+        判据只看「前台窗口是否别的进程且铺满虚拟屏」，因此录屏、全屏视频
+        同样让位——都属「别挡画面」的合理行为。
+        withdraw 而非降层：实测 overrideredirect 窗口 withdraw→deiconify 后
+        overrideredirect / 位置 / -topmost 三者均保持，比 lower() 彻底
+        （lower 对 topmost 窗口只在 topmost 带内下沉，压不住非 topmost 遮罩）。
+        """
+        if not self._alive():
+            return
+        try:
+            hide = (not self._dragging) and foreign_fullscreen()
+            if hide and not self._yielded:
+                self._yielded = True
+                self._tip_slot = None
+                self._tip_cancel()       # 让位前先收浮层：它独立置顶，会一起挡截图
+                self.win.withdraw()
+            elif not hide and self._yielded:
+                self._yielded = False
+                self.win.deiconify()
+                x, y = self.win.winfo_x(), self.win.winfo_y()
+                self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+                self.sync_top()
+                self.win.lift()
+        except Exception:
+            pass
+        try:
+            self.win.after(SV_YIELD_MS, self._yield_tick)
+        except Exception:
+            pass
+
+    # ---------- 悬停明细浮层（R-13） ----------
+    def motion(self, e):
+        """指针移动：热区变化才重启延时（Motion 高频，不能每次都排 after）。"""
+        if self._dragging:
+            return
+        slot = None
+        for k, (a, b) in self.hot.items():
+            if a <= e.x <= b:
+                slot = k
+                break
+        if slot == self._tip_slot:
+            return
+        self._tip_slot = slot
+        self._tip_cancel()
+        if slot is not None and self._alive():
+            try:
+                self._tip_after = self.win.after(
+                    SV_TIP_DELAY, lambda: self._tip_show(slot))
+            except Exception:
+                self._tip_after = None
+
+    def leave(self, e):
+        """指针离开：延时复核后再收（canvas→边框会误触发 Leave）。"""
+        if self._tip_after is not None:
+            try:
+                self.win.after_cancel(self._tip_after)
+            except Exception:
+                pass
+            self._tip_after = None
+        self._tip_slot = None
+        try:
+            self.win.after(120, self._leave_check)
+        except Exception:
+            pass
+
+    def _leave_check(self):
+        """120ms 后复核指针是否真的在窗外——在窗内（含 1px 边框）就不收。"""
+        if not self._alive():
+            return
+        try:
+            px_, py_ = self.win.winfo_pointerxy()
+            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
+            inside = (x <= px_ < x + self.W) and (y <= py_ < y + self.H)
+        except Exception:
+            inside = False
+        if not inside:
+            self._tip_cancel()
+
+    def _tip_show(self, kind):
+        """延时到点：建浮层填内容（拖动中/已让位则放弃）。"""
+        self._tip_after = None
+        if not self._alive() or self._dragging or self._yielded:
+            return
+        self._tip_kind = kind
+        self._tip_rows = None
+        self._tip_fill(force=True)
+
+    def _tip_rows_for(self, kind):
+        """按 kind 生成浮层文本行 [(内容, 基色), ...]。
+
+        内容为 str（整行基色）或 [(文本, 颜色), ...] 片段表；涨跌家数用片段
+        表行内分色——上涨红、下跌绿（用户口径，与行情涨跌配色一致）。量能段
+        与主窗成交额块浮层同文案（SView 侧独立生成，不依赖 Panel 私有方法，
+        §3.5）；白黄线段为沪深涨跌家数（R-14）。
+        """
+        t = self.theme
+        app = self.app
+        if kind == "amt":
+            st, axis, _note = app.calc_amt_state()
+            total, base, diff, pct, label = app._amt_values(st, axis)
+            sh, sz = app._amt_split()
+            c_diff = (t["up"] if diff and diff > 0
+                      else t["down"] if diff and diff < 0 else t["flat"])
+            pct_line = f"{pct:+.1f}%" if pct is not None else AMT_EMPTY
+            return [
+                (f"今日累计  {fmt_amount(total) if total else AMT_EMPTY}", t["text"]),
+                (f"沪 {fmt_amount(sh) if sh else AMT_EMPTY}   "
+                 f"深 {fmt_amount(sz) if sz else AMT_EMPTY}", t["sub"]),
+                (f"基准时点  {label}", t["sub"]),
+                (f"昨日基准  {fmt_amount(base) if base else AMT_EMPTY}", t["text"]),
+                (f"差额      {sv_amt_diff_text(diff)}", c_diff),
+                (f"比例      {pct_line}", c_diff),
+                ("口径  沪深两市合计", t["sub"]),
+                ("      不含北交所", t["sub"]),
+            ]
+        ud = app.sv_ud
+        if not ud:
+            return [(f"{PLACEHOLDER_NA}（家数暂不可用）", t["flat"])]
+        n = ud["up"] + ud["dn"] + ud["flat"]
+        up, dn = t["up"], t["down"]          # 涨红跌绿（与主窗行情一致）
+        return [
+            ([("沪深上涨 ", t["text"]), (f"{ud['up']}", up),
+              ("   下跌 ", t["text"]), (f"{ud['dn']}", dn)], t["text"]),
+            (f"平盘 {ud['flat']}   合计 {n}", t["sub"]),
+            ([("沪 ", t["sub"]), (f"{ud['up_sh']}", up), ("/", t["sub"]),
+              (f"{ud['dn_sh']}", dn),
+              ("   深 ", t["sub"]), (f"{ud['up_sz']}", up), ("/", t["sub"]),
+              (f"{ud['dn_sz']}", dn)], t["sub"]),
+            (f"数据时点 {ud.get('at') or PLACEHOLDER_NA}", t["sub"]),
+        ]
+
+    @staticmethod
+    def _tip_segs(row, base):
+        """行内容归一为 [(文本, 颜色), ...]：str 行整行用基色，片段表保持各段色。"""
+        if isinstance(row, str):
+            return [(row, base)] if row else []
+        return [(s, c or base) for s, c in row if s]
+
+    def _tip_fill(self, force=False):
+        """绘制浮层。内容未变直接返回——tick 每秒调用，整窗重绘会闪。"""
+        kind = self._tip_kind
+        if not kind:
+            return
+        try:
+            rows = self._tip_rows_for(kind)
+            if not force and rows == self._tip_rows:
+                return
+            self._tip_rows = rows
+            t = self.theme
+            pad, lh = self.px(9), self.px(16)
+            lines = [self._tip_segs(r, c) for r, c in rows]
+            # measure 与实际落笔在 150% 缩放下有偏差，按 1.08 放宽（主窗浮层同款）；
+            # 分色行按片段累加量宽，与实际落笔方式一致
+            w = int(max(sum(self.f_cn.measure(s) for s, _c in segs)
+                        for segs in lines) * 1.08) + pad * 2
+            h = lh * len(rows) + pad * 2
+            if self.tip is None or not self.tip.winfo_exists():
+                self._tip_create()
+            cv = self.tip_cv
+            cv.delete("all")
+            cv.configure(width=w, height=h)
+            cv.create_rectangle(0, 0, w - 1, h - 1,
+                                fill=t["head"], outline=t["line"])
+            y = pad + lh / 2
+            for segs in lines:
+                x = pad
+                for seg, col in segs:
+                    cv.create_text(x, y, anchor="w", text=seg, fill=col,
+                                   font=self.f_cn)
+                    x += self.f_cn.measure(seg)
+                y += lh
+            self._tip_place(w, h)
+        except Exception as ex:
+            self.app._dbg(f"sv tip 异常: {ex!r}")
+            self._tip_cancel()
+
+    def _tip_create(self):
+        """无边框置顶浮层；以悬浮框为父，主窗销毁时一并回收。"""
+        w = tk.Toplevel(self.win)
+        w.overrideredirect(True)
+        w.configure(bg=self.theme["head"])
+        try:
+            w.attributes("-topmost", bool(self.app.cfg.get("topmost", True)))
+        except Exception:
+            pass
+        cv = tk.Canvas(w, bg=self.theme["head"], highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        self.tip, self.tip_cv = w, cv
+        self._tip_click_through(w)
+
+    def _tip_click_through(self, w):
+        """鼠标穿透：补 WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW。
+
+        浮层压在悬浮框上方，不穿透会吃掉 <Motion>/<Leave>，指针移开后
+        浮层永远收不掉。句柄参与 ctypes 必须设 argtypes/restype（项目铁律）。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.GetAncestor.restype = wintypes.HWND
+            u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            u.GetWindowLongW.restype = wintypes.LONG
+            u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int,
+                                         wintypes.LONG]
+            u.SetWindowLongW.restype = wintypes.LONG
+            hwnd = u.GetAncestor(w.winfo_id(), 2) or w.winfo_id()
+            style = u.GetWindowLongW(hwnd, -20)          # GWL_EXSTYLE
+            u.SetWindowLongW(hwnd, -20, style | 0x00000020 | 0x00000080)
+        except Exception as ex:
+            self.app._dbg(f"sv tip 穿透异常: {ex!r}")
+
+    def _tip_place(self, w, h):
+        """默认放悬浮框正上方；上方空间不足则放下方（§3.5）。"""
+        try:
+            sw = self.win.winfo_screenwidth()
+            sh = self.win.winfo_screenheight()
+            x = max(0, min(self.win.winfo_x(), sw - w))
+            y = self.win.winfo_y() - h - self.px(6)
+            if y < 0:
+                y = self.win.winfo_y() + self.H + self.px(6)
+            y = max(0, min(y, sh - h))
+            self.tip.geometry(f"{w}x{h}+{x}+{y}")
+            self.tip.deiconify()
+            self.tip.lift()
+        except Exception:
+            pass
+
+    def _tip_cancel(self):
+        """撤延时句柄与浮层（可重复调用）。"""
+        if self._tip_after is not None:
+            try:
+                self.win.after_cancel(self._tip_after)
+            except Exception:
+                pass
+            self._tip_after = None
+        self._tip_kind = None
+        self._tip_rows = None
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+            self.tip_cv = None
+
+    # ---------- 拖动与右键 ----------
+    def press(self, e):
+        self._tip_slot = None
+        self._tip_cancel()               # 开始拖动即收浮层（AC-30）
+        self._dragging = True
+        self._dx, self._dy = e.x, e.y
+
+    def drag(self, e):
+        x = self.win.winfo_x() + e.x - self._dx
+        y = self.win.winfo_y() + e.y - self._dy
+        self.win.geometry(f"+{x}+{y}")
+
+    def drop(self, e):
+        self._dragging = False
+        x = max(0, min(self.win.winfo_x(),
+                       self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(self.win.winfo_y(),
+                       self.win.winfo_screenheight() - self.H))
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        cfg = self.app.cfg                    # 位置记忆（R-06，drop 落盘）
+        cfg["sview_x"], cfg["sview_y"] = x, y
+        save_json(CONFIG_FILE, cfg)
+
+    def menu(self, e):
+        self._tip_slot = None
+        self._tip_cancel()               # 右键菜单弹出前收浮层，避免压住菜单
+        t = self.theme
+        # 与主窗菜单同款配色（BUG-13）：高亮色跟主题走，不用硬编码深蓝
+        m = tk.Menu(self.win, tearoff=0, bg=t["head"], fg=t["text"],
+                    activebackground=t["sel"], activeforeground=t["sel_fg"],
+                    disabledforeground=t["sub"],
+                    bd=0, font=(self.f_cn, 9))
+        m.add_command(label="隐藏", command=lambda: self.app.toggle_sview(False))
+        m.add_command(label="重置位置", command=self.reset_pos)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def reset_pos(self):
+        cfg = self.app.cfg
+        cfg.pop("sview_x", None)
+        cfg.pop("sview_y", None)
+        save_json(CONFIG_FILE, cfg)
+        x = self.app.root.winfo_x()
+        y = self.app.root.winfo_y() + self.app.root.winfo_height() + self.px(8)
+        x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
 
 # ---------------------------------------------------------------- K线窗口
@@ -7445,6 +8363,75 @@ def selftest():
     if not (p_ok and m_ok):
         print(f"  heads={[(m[1], m[2]) for m in p_heads]} lines={p_lines} "
               f"clamp={_pc} mapped={mapped}")
+
+    # ---- 盘面速览：纯函数自检（无网络，R10-T009）----
+    sv_rows = ["0.99", "0.00", "", None, "-1.20"] * 200   # 1000 条，非法按 0 计
+    sv_mean = sv_yellow_mean(sv_rows)
+    sv_mok = (sv_mean is not None
+              and abs(sv_mean - (0.99 - 1.20) * 200 / 1000) < 1e-9
+              and sv_yellow_mean([]) is None)
+    # 判词矩阵 9 格全覆盖 + 阈值边界（> 严格）+ None 入参
+    sv_cases = (
+        ((0.50, 0.10, 10.0), "放量·二八行情"),
+        ((0.50, 0.50, 10.0), "放量·同步上涨"),
+        ((0.50, 0.90, 10.0), "放量·普涨"),
+        ((0.00, 0.10, 10.0), "放量·盘整"),
+        ((0.00, 0.00, 10.0), "放量·盘整"),
+        ((0.00, -0.10, 10.0), "放量·盘整"),
+        ((-0.50, -0.10, 10.0), "放量·权重领跌"),   # 白−黄=-0.4 → 黄在上（黄▲白）
+        ((-0.50, -0.50, 10.0), "放量·普跌"),
+        ((-0.50, -0.90, 10.0), "放量·权重抗跌"),   # 白−黄=+0.4 → 白在上（黄▼白）
+        ((0.50, 0.10, -10.0), "缩量·二八行情"),
+        ((0.00, 0.00, -10.0), "缩量·盘整"),
+        ((0.50, 0.10, 0.0), "平量·二八行情"),
+        ((0.06, 0.0, 5.0), "放量·二八行情"),     # 边界：diff/涨跌/量能三阈值全压线
+        ((0.05, 0.0, 5.0), "放量·盘整"),         # sh=0.05 不算涨（> 严格）
+        ((0.10, 0.05, 5.0), "放量·同步上涨"),    # diff=0.05 粘合（> 严格）
+        ((0.10, 0.15, -5.0), "缩量·同步上涨"),   # diff=-0.05 粘合、amt=-5.0 缩量
+        ((0.10, 0.15, -4.99), "平量·同步上涨"),  # amt 差一点不算缩量
+    )
+    sv_bad = [(k, sv_verdict(*k), w) for k, w in sv_cases if sv_verdict(*k) != w]
+    sv_vok = (not sv_bad
+              and sv_verdict(None, 0.0, 0.0) is None
+              and sv_verdict(0.0, None, 0.0) is None
+              and sv_verdict(0.0, 0.0, None) is None)
+    print(f"[sv    ] 黄线均值(1000条,非法按0) {sv_mean:+.4f}  判词矩阵17例+None "
+          f"{'OK' if sv_mok and sv_vok else '!! ' + str(sv_bad)}")
+
+    # v1.1.0：涨跌家数分组（bj 忽略）与量能差额文本四态（R-12/R-14）
+    ud_rows = [{"symbol": "sh600000", "changepercent": "1.0"},
+               {"symbol": "sh600001", "changepercent": "-1.0"},
+               {"symbol": "sh600002", "changepercent": ""},
+               {"symbol": "sz000001", "changepercent": "2.0"},
+               {"symbol": "sz000002", "changepercent": "0.0"},
+               {"symbol": "bj430001", "changepercent": "5.0"}] * 200
+    ud = sv_updown(ud_rows)
+    ud_ok = (ud is not None
+             and (ud["up"], ud["dn"], ud["flat"]) == (400, 200, 400)
+             and (ud["up_sh"], ud["dn_sh"]) == (200, 200)
+             and (ud["up_sz"], ud["dn_sz"]) == (200, 0)      # bj 不入任何口径
+             and sv_updown([]) is None)
+    ad_cases = ((3.88e10, "↑+388亿"), (-3.88e10, "↓-388亿"),
+                (0, "→0.0亿"), (1e6, "→0.0亿"), (1.2e12, "↑+1.20万亿"),
+                (None, PLACEHOLDER_NA))
+    ad_bad = [(v, sv_amt_diff_text(v), w) for v, w in ad_cases
+              if sv_amt_diff_text(v) != w]
+    # 浮层行内分色（涨红跌绿）：str 行套基色、片段行保各段色、空片段过滤
+    seg_ok = (SView._tip_segs("沪深上涨 1", "#AAA") == [("沪深上涨 1", "#AAA")]
+              and SView._tip_segs([("沪 ", "#111"), ("12", "#F00"),
+                                   ("", "#0F0")], "#111")
+              == [("沪 ", "#111"), ("12", "#F00")]
+              and SView._tip_segs([("x", None)], "#222") == [("x", "#222")]
+              and SView._tip_segs("", "#222") == [])
+    print(f"[sv2   ] 涨跌家数(沪/深分组,bj忽略) 量能差额四态 浮层分色 "
+          f"{'OK' if ud_ok and not ad_bad and seg_ok else '!! ' + str((ud, ad_bad, seg_ok))}")
+
+    # 截图让位探测（BUG-10）：只验可用性与不抛异常，前台态随运行环境变化故不断言值
+    try:
+        ff_val = foreign_fullscreen()
+        print(f"[yield ] 前台全屏探测 可用（返回 {ff_val}，正常桌面应为 False）OK")
+    except Exception as ex:
+        print(f"[yield ] 前台全屏探测 !! {ex!r}")
 
     # 行业：只报告可用性，失败不影响退出码
     indie = [c for c in codes if need_industry(c)]
