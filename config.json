@@ -5,7 +5,7 @@
   "topmost": true,
   "trading_refresh": 5,
   "idle_refresh": 60,
-  "width": 291,
+  "width": 334,
   "max_height": 460,
   "groups": [
     {
@@ -77,32 +77,48 @@
           "alias": "豪能股份"
         },
         {
-          "code": "sz000799",
-          "alias": "酒鬼酒"
-        },
-        {
           "code": "sz300182",
           "alias": "捷成股份"
         },
         {
-          "code": "sh512100",
-          "alias": "中证1000ETF南方"
+          "code": "sz159633",
+          "alias": "中证1000ETF易方达"
         },
         {
-          "code": "sh510500",
-          "alias": "中证500ETF南方"
+          "code": "sh510510",
+          "alias": "中证500ETF广发"
         },
         {
           "code": "sz159531",
           "alias": "中证2000ETF南方"
         },
         {
+          "code": "sz159142",
+          "alias": "科创创业人工智能ETF景顺"
+        },
+        {
+          "code": "sz300660",
+          "alias": "江苏雷利"
+        },
+        {
           "code": "sz300488",
           "alias": "恒锋工具"
         },
         {
+          "code": "sz000799",
+          "alias": "酒鬼酒"
+        },
+        {
           "code": "sh688717",
           "alias": "艾罗能源"
+        },
+        {
+          "code": "sh600438",
+          "alias": "通威股份"
+        },
+        {
+          "code": "sz300274",
+          "alias": "阳光电源"
         },
         {
           "code": "sh601375",
@@ -125,12 +141,12 @@
           "alias": "高股息ETF广发"
         },
         {
-          "code": "sh512690",
-          "alias": "酒ETF鹏华"
-        },
-        {
           "code": "sh600216",
           "alias": "浙江医药"
+        },
+        {
+          "code": "sh512690",
+          "alias": "酒ETF鹏华"
         },
         {
           "code": "sz000995",
@@ -145,8 +161,12 @@
           "alias": "锦龙股份"
         },
         {
-          "code": "sz300660",
-          "alias": "江苏雷利"
+          "code": "sz399852",
+          "alias": "中证1000"
+        },
+        {
+          "code": "sz300124",
+          "alias": "汇川技术"
         }
       ]
     }
@@ -189,5 +209,9 @@
     "x": 620,
     "y": 213
   },
-  "page_size": 20
+  "page_size": 20,
+  "sview_on": true,
+  "sview_x": 1951,
+  "sview_y": 1480,
+  "folded": true
 }
