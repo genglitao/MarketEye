@@ -26,6 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
+from collections import deque
 from datetime import datetime, time as dtime
 
 import tkinter as tk
@@ -180,9 +181,56 @@ SV_H = 30                 # 悬浮框高度（逻辑像素）
 SV_GAP = 10               # 段间距（逻辑像素）
 SV_YIELD_MS = 250         # 截图让位检测间隔（BUG-10）
 SV_TIP_DELAY = 300        # 悬停明细浮层延时（毫秒，R-13）
+SV_TREND_W = 272          # 走势图区最小宽（逻辑像素；v1.2.2 起浮层与悬浮框同宽）
+SV_TREND_H = 150          # 走势图区高（逻辑像素，v1.2.2 由 96 提到 150）
+SV_TREND_STEP = 5         # 走势图 x 轴聚合步长（分钟，0..240 → 49 点）
+SV_TREND_TTL = 120        # 走势图数据缓存有效期（秒，D12 按需取）
+SV_TREND_DASH = (3, 3)    # 昨日线虚线样式
+SV_HOVER_MS = 90          # 走势图指针定位轮询间隔（毫秒，v1.2.0 / R-16）
 # 定宽测量的最坏样本（§3.5：与当日数据无关，块宽恒定不随内容伸缩）
 SV_WORST = {"bw": "黄▼白 -9.9%", "sh": "沪 39999.99 +9.99%",
             "amt": "↓-1.20万亿", "vd": "平量·权重领跌", "closed": "休市"}
+
+# ---- 板块异动（SDD §3.7.1；新浪板块快照 → 本地 3 分钟时序 → 时间线小窗）----
+# 新浪不给涨速字段，3 分钟涨幅与两窗口成交额增量全部由本地时序算出。
+BW_URL_HY = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+BW_URL_GN = "https://money.finance.sina.com.cn/q/view/newFLJK.php?param=class"
+BW_INTERVAL = 30          # 采集周期（秒，系统内定不暴露配置）
+BW_IDLE_CHECK = 5         # 非交易时段自检间隔（秒）
+BW_REQ_GAP = 0.03         # 两请求串行间隔（秒，防限流）
+BW_TIMEOUT = 10           # 单请求超时（秒）
+BW_MIN_HY = 40            # 行业条数下限（实测 49）
+BW_MIN_GN = 120           # 概念条数下限（实测 172，会浮动，只做下限不写死）
+BW_KEEP = 360             # 时序保留（秒，6 分钟）
+BW_KEEP_N = 13            # 时序最大点数（360/30 + 1）
+BW_WIN = 180              # 判定窗口（秒，3 分钟）
+BW_SPAN_MIN = 165         # 窗口跨度下限（180 − 15，容差半个采集周期）
+BW_SPAN_MAX = 195         # 窗口跨度上限（180 + 15，超限即视为丢轮）
+BW_TH_PCT = 0.8           # 涨速阈值（%）
+BW_TH_VOL = 1.3           # 放量倍数阈值
+BW_TH_AMT = 5e7           # 放量绝对下限（元，5000 万）
+BW_LVL_MID = 1.5          # 中档下限（%）
+BW_LVL_STRONG = 2.5       # 强档下限（%）
+BW_DEDUP = 600            # 同向去重窗口（秒，10 分钟）
+BW_MAX = 200              # 当日事件上限
+BW_MIN_MEMBERS = 5        # 板块最小成分股数
+BW_FAIL_LIMIT = 3         # 连续失败转中断（轮）
+BW_W = 340                # 窗口宽（逻辑像素）
+BW_H = 420                # 窗口高
+BW_HEAD = 34              # 标题栏高
+BW_ROW = 39               # 单条事件高（主行 16 + 间隔 1 + 副行 13 + 留白 9）
+BW_VIS = 9                # 可视行数
+BW_R = 16                 # 窗口圆角半径
+BW_EVENTS_FILE = os.path.join(BASE, "block_events.json")
+BW_LVL_CN = ("弱", "中", "强")
+# 指标说明（R-20）：文本与 R-02/R-03/R-05/R-06 同源，改阈值只动上面常量
+BW_TIP_ROWS = (
+    ("涨速", f"3 分钟 ≥ {BW_TH_PCT:g}%（涨或跌）"),
+    ("放量", f"成交额 ≥ 前 3 分钟 {BW_TH_VOL:g} 倍 且 ≥ {BW_TH_AMT / 1e4:.0f} 万"),
+    ("档位", f"{BW_TH_PCT:g} / {BW_LVL_MID:g} / {BW_LVL_STRONG:g}% → 弱 / 中 / 强"),
+    ("去重", f"同向 {BW_DEDUP // 60} 分钟一条，升档记「升级」"),
+)
+BW_TIP_FOOT = "时序不足 6 分钟时放量豁免，该条标「未校验」。"
 
 # ---- K 线窗口（SDD §3.7.1；第二轮 2026-10-30：10 档 / 6 均线 / MACD / 分时）----
 KLINE_DEF_W, KLINE_DEF_H = 880, 640   # 默认窗口尺寸（逻辑像素）
@@ -500,6 +548,64 @@ def sv_updown(rows):
     return st
 
 
+def amt_trend_points(series, last_ax, step=SV_TREND_STEP):
+    """241 定长累计序列 → [(分钟轴, 值), ...]（T017 / PRD R-15）。
+
+    只取到 last_ax（今日盘中末轴），按 step 抽点；末轴不是 step 整数倍时
+    补一点，保证线尾精确落在当前分钟。空序列或 last_ax < 0 → []。
+    """
+    if not series or last_ax is None or last_ax < 0:
+        return []
+    last = min(int(last_ax), len(series) - 1)
+    if last < 0:
+        return []
+    out = [(ax, series[ax]) for ax in range(0, last + 1, step)]
+    if out and out[-1][0] != last:
+        out.append((last, series[last]))
+    return out
+
+
+def amt_ax_time(ax):
+    """分钟轴 → 「HH:MM」（0=09:30，120=11:30/13:00，240=15:00；R-16）。
+
+    午休折轴后 120 同时是 11:30 与 13:00，显示取前半场（11:30）。
+    """
+    ax = max(0, min(240, int(ax)))
+    mins = (9 * 60 + 30 + ax) if ax <= 120 else (13 * 60 + ax - 120)
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def amt_trend_scale(today_last, prev_last):
+    """y 轴上限：max(两条末值) × 1.06，向下取整到 100 亿（T017）。
+
+    取整防 1 秒刷新导致刻度抖动（8000→8030 亿不该让网格跳一下）。
+    双 None → 0.0（图区退化为空网格）。
+    """
+    vals = [v for v in (today_last, prev_last) if v]
+    if not vals:
+        return 0.0
+    top = max(vals) * 1.06
+    grid = 100e8
+    return float(int(top // grid) * grid) if top >= grid else float(top)
+
+
+def tip_cols_at(widths, w, pad, g_min, g_max):
+    """浮层多列起点（v1.2.2）：余量均分到列间距并钳在 [g_min, g_max]。
+
+    列宽随行情变化（「沪 12345亿 深 23456亿」这类宽值），固定坐标必然
+    压字；按实测宽度累进排布，间距吃余量但不无限拉开，右侧也不留大片
+    空白。余量不足时取 g_min，宁可略微超宽也不让相邻列贴死。
+    """
+    slack = (w - pad * 2) - sum(widths)
+    n = max(1, len(widths) - 1)
+    g = max(g_min, min(g_max, slack // n))
+    xs, x = [], pad
+    for wd in widths:
+        xs.append(x)
+        x += wd + g
+    return xs
+
+
 def sv_amt_diff_text(diff):
     """量能差额（元）→ 「↑+388亿」/「↓-388亿」/「→0.0亿」（R-12 / T013）。
 
@@ -554,6 +660,110 @@ def is_trading(now=None):
         return False
     t = now.time()
     return (dtime(9, 15) <= t <= dtime(11, 35)) or (dtime(12, 55) <= t <= dtime(15, 10))
+
+
+def is_session(now=None):
+    """连续竞价时段（9:30–11:30 / 13:00–15:00，周末 False）。
+
+    与既有 `is_trading` 并列、互不替代（裁决 D8）：后者 9:15 起、含集合竞价
+    缓冲，是给主窗「竞价时也能看行情」用的；板块异动若沿用它，9:15–9:30 的
+    竞价快照会进时序，9:30 开盘瞬间拿竞价价当 3 分钟基准，一次刷出几十条假
+    异动。两者只差 15 分钟，但对该功能是致命的。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return (dtime(9, 30) <= t <= dtime(11, 30)) or (dtime(13, 0) <= t <= dtime(15, 0))
+
+
+def bw_parse(text, kind):
+    """新浪板块快照 GBK 文本 → {code: {...}}（T002 / §3.2.1）。
+
+    报文是 JS 赋值语句而非 JSON（`var S_... = {"code":"code,name,19,..."};`），
+    用正则取键值对，**不 eval**。单值 13 段逗号分隔：0 代码 / 1 名称 /
+    2 成分数 / 5 涨跌幅 / 7 成交额 / 9 领涨股涨幅 / 12 领涨股名。
+    `len(f) > 13` 说明领涨股名里带英文逗号，把尾部并回第 12 段；段数不足或
+    关键字段非数值的单条丢弃（不降级整轮）。条数低于下限返回 None（整轮作废，
+    概念数随接口浮动，只做下限校验——裁决 D9）。
+    """
+    if not text:
+        return None
+    i, j = text.find("{"), text.rfind("}")
+    if i < 0 or j <= i:
+        return None
+    out, bad = {}, 0
+    for m in re.finditer(r'"([^"]+)"\s*:\s*"([^"]*)"', text[i + 1:j]):
+        code, val = m.group(1), m.group(2)
+        f = val.split(",")
+        if len(f) > 13:
+            f = f[:12] + [",".join(f[12:])]
+        if len(f) < 13:
+            bad += 1
+            continue
+        try:
+            members = int(f[2])
+            pct = float(f[5])
+            amt = float(f[7])
+            lead_pct = float(f[9]) if f[9].strip() else 0.0
+        except (TypeError, ValueError):
+            bad += 1
+            continue
+        out[code] = {"name": f[1], "members": members, "pct": pct, "amt": amt,
+                     "lead": f[12], "lead_pct": lead_pct}
+    if bad > 20:
+        log_once(f"bw 单条解析丢弃 {bad} 条（{kind}）")
+    lo = BW_MIN_HY if kind == "hy" else BW_MIN_GN
+    return out if len(out) >= lo else None
+
+
+def bw_lvl(pct):
+    """涨幅 → 档位下标（R-05）：左闭右开，2.5 归强。"""
+    a = abs(pct)
+    if a < BW_LVL_MID:
+        return 0
+    if a < BW_LVL_STRONG:
+        return 1
+    return 2
+
+
+def bw_window(series, now, win=BW_WIN):
+    """时序 → (pct_then, amt_then, span)（R-02）。
+
+    在 time 递增的 deque 里定位 `ts ≤ now − win` 的**最近**点（deque 按时间
+    递增，最后一个满足者即最近点）。无满足点返回 None。
+    """
+    best = None
+    cut = now - win
+    for it in series:
+        if it[0] <= cut:
+            best = it
+        else:
+            break
+    if best is None:
+        return None
+    return best[1], best[2], now - best[0]
+
+
+def bw_verdict(diff, pct_now, inc1, inc0):
+    """单板块判定（R-02~R-04）→ (hit, lvl, mult, unverified)。
+
+    `diff` 3 分钟涨幅；`inc1` 本窗成交额增量；`inc0` 前窗增量（None = 不可用）。
+    档位取 `bw_lvl(diff)`（涨跌对称，绝对值）。放量三态：双条件满足 → 真倍数；
+    前窗不可用（时序不足 / inc0 ≤ 0 / 前窗跨度越界 / 成交额回退）→ 豁免，
+    `mult=None` 且 `unverified=True`（R-04/D11）；inc1 为负属数据抖动，跳过。
+    """
+    if abs(diff) < BW_TH_PCT:
+        return False, 0, None, False
+    lvl = bw_lvl(diff)
+    if inc1 < 0:
+        return False, 0, None, False
+    if inc0 is None or inc0 <= 0:
+        return True, lvl, None, True
+    mult = inc1 / inc0
+    if inc1 >= BW_TH_AMT and mult >= BW_TH_VOL:
+        return True, lvl, mult, False
+    return False, 0, None, False
 
 
 def fmt_price(p):
@@ -813,6 +1023,33 @@ def _amt_merge_series(sh, sz, day):
             lb = b[ax]
         out.append(la + lb)
     return out
+
+
+def fetch_amt_trend():
+    """沪深分时累计成交额（今日 + 上一交易日），供量能走势图（T017 / §3.2.3）。
+
+    与 fetch_amt_base 同源同解析器（`_amt_day_series`），区别是取 days[-1] 当
+    今日、days[-2] 当昨日，并另算 last_ax —— `_amt_merge_series` 对缺失轴沿用
+    上一值（为基准的单调性服务），今日盘中若不截断，曲线会凭空延伸到 15:00。
+    只许 daemon 线程调用：两次网络请求，实测 0.37~0.41 秒。
+    """
+    sh = _amt_day_series(AMT_INDEX_SH)
+    sz = _amt_day_series(AMT_INDEX_SZ)
+    days = sorted(set(sh) & set(sz))
+    if len(days) < 2:
+        raise ValueError("分时不足两个交易日")
+    today, prev = days[-1], days[-2]
+    axes = [max(m) for m in (sh.get(today) or {}, sz.get(today) or {}) if m]
+    if not axes:
+        raise ValueError("今日分时为空")
+    return {
+        "today": _amt_merge_series(sh, sz, today),
+        "prev": _amt_merge_series(sh, sz, prev),
+        "last_ax": int(max(axes)),
+        "today_date": today,
+        "prev_date": prev,
+        "at": time.time(),
+    }
 
 
 def fetch_amt_base(stage="intraday"):
@@ -1114,6 +1351,35 @@ def fetch_sina_hs():
         time.sleep(SV_PAGE_GAP)        # 页间节流：56 页连打容易被限流
     if len(out) < SV_MIN_ROWS:
         raise RuntimeError(f"sv 样本数 {len(out)} 可疑")
+    return out
+
+
+def _bw_get(url):
+    """新浪板块快照单请求（GBK）：非 200 直接抛，只许 daemon 调用。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://finance.sina.com.cn/",
+    })
+    with urllib.request.urlopen(req, timeout=BW_TIMEOUT) as resp:
+        if getattr(resp, "status", 200) != 200:
+            raise RuntimeError(f"bw http {resp.status}")
+        return resp.read().decode("gbk", errors="ignore")
+
+
+def fetch_bw_snap():
+    """一轮板块快照：行业 + 概念两个接口**串行**拉取后合并（T003 / §3.2.1）。
+
+    实测单轮 0.37~0.41 秒（两个请求）；并发请求会被对端断连，故串行 + 30ms
+    间隔。任一接口失败、条数不达标一律整轮失败（M-01：不取半截数据冒充
+    全量），由调用方计一次失败轮。只许 daemon 线程调用。
+    """
+    hy = bw_parse(_bw_get(BW_URL_HY), "hy")
+    time.sleep(BW_REQ_GAP)
+    gn = bw_parse(_bw_get(BW_URL_GN), "gn")
+    if hy is None or gn is None:
+        raise RuntimeError(f"bw 条数可疑 hy={len(hy or ())} gn={len(gn or ())}")
+    out = dict(hy)
+    out.update(gn)          # 概念覆盖同名行业代码的情况不存在（前缀不同）
     return out
 
 
@@ -1583,6 +1849,24 @@ class Panel:
         self.sv_fails = 0
         self.sv_thread = None
         self.sv_closed_shot = False
+        # 量能走势图（v1.1.3 / R-15）：按需取，不常驻轮询（D12）
+        self.amt_trend = None        # {today, prev, last_ax, prev_date, at}
+        self.amt_trend_at = 0.0      # 缓存时间戳（TTL 判定）
+        self.amt_trend_busy = False  # 取数门闩（防连续悬停重复起线程）
+        self.amt_trend_fail = False  # 最近一次取数失败（图区降级提示）
+
+        # 板块异动状态（SDD §3.1）：小窗隐藏即销毁，引擎常驻——隐藏期间
+        # 已载入的当日事件不重复读盘；bw_fails/bw_stale 只由 poll 写（线程边界）
+        self.bw_view = None
+        self.bw_engine = BlockEngine()
+        self.bw_thread = None
+        self.bw_fails = 0
+        self.bw_stale = False
+        # 启动装载当日存档（R-19）：日期不符自动清空并覆盖
+        try:
+            self.bw_engine.load(datetime.now().strftime("%Y-%m-%d"))
+        except Exception as ex:
+            self._dbg(f"bw 存档装载失败: {ex!r}")
 
         # 列状态：先加载配置，菜单才能取到正确的初始勾选态
         self.col_order = list(COL_KEYS)
@@ -1639,6 +1923,8 @@ class Panel:
         self.root.after(120, self.center_first)
         if self.cfg.get("sview_on"):
             self.toggle_sview(True)   # 启动即恢复上次显隐态（worker 随之创建）
+        if self.cfg.get("block_on"):
+            self.toggle_block(True)   # 板块异动小窗同理（保存的当日事件随即可见）
 
     # ---------- 尺寸 ----------
     def px(self, v):
@@ -2834,6 +3120,13 @@ class Panel:
                       command=lambda: self.toggle_sview())
         self.sview_menu_idx = m.index("end")
 
+        # 板块异动开关（F-02）：同款白色对勾位图，紧随「盘面速览」
+        m.add_command(label="板块异动",
+                      image=self.img_chk_on if self.cfg.get("block_on") else self.img_chk_off,
+                      compound="left",
+                      command=lambda: self.toggle_block())
+        self.block_menu_idx = m.index("end")
+
         op = self._mk_menu(m)
         for pct in (100, 94, 85, 70):
             self._menu_cmd(op, f"{pct}%", lambda p=pct: self.set_alpha(p / 100))
@@ -3456,6 +3749,37 @@ class Panel:
                                 self.sview.set_closed(self.sv_closed_shot)
                         except Exception as ex:
                             self._dbg(f"sv closed 处理异常: {ex!r}")
+                    elif kind == "amt_trend":
+                        try:
+                            self.amt_trend = payload
+                            self.amt_trend_at = time.time()
+                            self.amt_trend_fail = False
+                        except Exception as ex:
+                            self._dbg(f"amt trend 落地异常: {ex!r}")
+                    elif kind == "amt_trend_err":
+                        self.amt_trend_fail = True
+                    elif kind == "bw":
+                        # 独立 try：异动判定失败绝不影响行情/成交额/速览
+                        try:
+                            self._bw_apply(payload)
+                        except Exception as ex:
+                            self._dbg(f"bw apply 异常: {ex!r}")
+                    elif kind == "bw_err":
+                        try:
+                            self.bw_fails += 1
+                            if self.bw_fails >= BW_FAIL_LIMIT and not self.bw_stale:
+                                # R-15：3 连败转中断，时序停推、列表保持不动
+                                self.bw_stale = True
+                                self.bw_engine.freeze()
+                        except Exception as ex:
+                            self._dbg(f"bw err 处理异常: {ex!r}")
+                    elif kind == "bw_day":
+                        try:
+                            self.bw_engine.load(str(payload))
+                            if self.bw_view is not None and self.bw_view._alive():
+                                self.bw_view.reset_view()
+                        except Exception as ex:
+                            self._dbg(f"bw day 处理异常: {ex!r}")
                     else:
                         self.err = payload
                         self.paint()
@@ -3865,6 +4189,7 @@ class Panel:
         self._refresh_page_menu()     # 每页条数档位同理
         self._refresh_amt_menu()      # 成交额开关同理
         self._refresh_sview_menu()    # 盘面速览开关同理
+        self._refresh_block_menu()    # 板块异动开关同理
         # 行上下文：菜单是启动时一次构建的全局菜单，右键所在行只能在弹出前
         # 反查并写入 _menu_code；未命中行（空白区/折叠态）置灰两项（审核 P7）
         code = None
@@ -3880,6 +4205,7 @@ class Panel:
         except Exception:
             pass
         try:
+            menu_topmost(self.menu)      # 主窗也是 -topmost，菜单同样要先置顶
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
             self.menu.grab_release()
@@ -3981,6 +4307,31 @@ class Panel:
             raise RuntimeError("sv 空样本")
         self.q.put(("sv", (mean, stats)))
 
+    def ensure_amt_trend(self):
+        """量能走势图数据按需取（T018 / §3.2.3 / D12）。
+
+        悬停量能段才调用：缓存未过期直接返回，过期且无在途任务则起 daemon。
+        不走 AMT_REQ_LIMIT —— 那是基准请求的日配额（8 次），走势图共用会把
+        基准挤成 D2，量能段整体失效。
+        """
+        now = time.time()
+        if self.amt_trend and now - self.amt_trend_at < SV_TREND_TTL:
+            return
+        if self.amt_trend_busy:
+            return
+        self.amt_trend_busy = True
+
+        def run():
+            try:
+                self.q.put(("amt_trend", fetch_amt_trend()))
+            except Exception as ex:
+                self._dbg(f"amt trend 失败: {ex!r}")
+                self.q.put(("amt_trend_err", None))
+            finally:
+                self.amt_trend_busy = False
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _sv_apply(self, payload):
         """黄线与家数落地（链路 2）：成功清零失败计数（R-09 自动恢复）。"""
         if isinstance(payload, tuple):
@@ -3992,6 +4343,107 @@ class Panel:
         if stats is not None:
             self.sv_ud = stats
         self.sv_fails = 0
+
+    # ---------- 板块异动（T008/T009） ----------
+    def toggle_block(self, on=None):
+        """显隐板块异动小窗：隐藏即销毁，worker 随开启创建（F-02）。
+
+        重新显示必须清时序（R-16②）：盘中取消勾选 4 分钟再勾上，series 里仍是
+        隐藏前的旧点，取到的 span≈240 秒会被误当成 3 分钟窗口，把跨隐藏间隙的
+        涨幅报成一次异动。
+        """
+        if on is None:
+            on = self.bw_view is None
+        self.cfg["block_on"] = bool(on)
+        save_json(CONFIG_FILE, self.cfg)
+        if on:
+            self.bw_engine.reset_series()
+            self.bw_fails = 0
+            self.bw_stale = False
+            if self.bw_view is None or not self.bw_view._alive():
+                self.bw_view = BView(self)
+            self._bw_start_worker()
+        else:
+            bv, self.bw_view = self.bw_view, None
+            if bv is not None:
+                try:
+                    bv.win.destroy()
+                except Exception:
+                    pass
+        self._refresh_block_menu()
+
+    def _refresh_block_menu(self):
+        """弹出菜单前对齐「板块异动」对勾与实际显隐态（M-02）。"""
+        try:
+            self.menu.entryconfigure(
+                self.block_menu_idx,
+                image=(self.img_chk_on if self.cfg.get("block_on")
+                       else self.img_chk_off))
+        except Exception:
+            pass
+
+    def _bw_start_worker(self):
+        if self.bw_thread is not None and self.bw_thread.is_alive():
+            return                    # 隐藏后重开：旧线程醒来自然续跑
+        self.bw_thread = threading.Thread(target=self._bw_worker, daemon=True)
+        self.bw_thread.start()
+
+    def _bw_worker(self):
+        """板块快照轮询 daemon（T003）：连续竞价时段 30 秒一轮，其余时段 5 秒
+        自检且**不发任何请求**（M-03）；循环条件含 bw_view——隐藏即自然退出。
+
+        `_last_day` 用函数内局部变量做跨日跃变检测（R-19）：仅当 is_session
+        首次为真且日期变了才上报 bw_day，避免每轮都发。
+        """
+        next_poll = 0.0
+        last_day = datetime.now().strftime("%Y-%m-%d")
+        while not self.stop and self.bw_view is not None:
+            try:
+                if is_session():
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    if today != last_day:
+                        last_day = today
+                        self.q.put(("bw_day", today))
+                        next_poll = 0.0
+                    if time.time() >= next_poll:
+                        try:
+                            self.q.put(("bw", fetch_bw_snap()))
+                        except Exception as ex:
+                            self.q.put(("bw_err", str(ex)))
+                        next_poll = time.time() + BW_INTERVAL
+                    time.sleep(2)          # 细分睡眠：隐藏后能及时退出
+                else:
+                    time.sleep(BW_IDLE_CHECK)
+            except Exception as ex:
+                self._dbg(f"bw worker {ex!r}")
+                time.sleep(BW_IDLE_CHECK)
+
+    def bw_phase(self):
+        """标题栏三段状态（R-13）：中断优先于休市。"""
+        if self.bw_stale:
+            return "stale"
+        return "live" if is_session() else "closed"
+
+    def _bw_apply(self, snap):
+        """快照落地（链路 3）：中断恢复先清时序（R-16①，不跨中断做差）。"""
+        if self.bw_stale:
+            self.bw_engine.reset_series()
+            self.bw_stale = False
+        self.bw_fails = 0
+        new = self.bw_engine.feed(snap, time.time())
+        if new:
+            self.bw_engine.save()                       # R-18
+            if self.bw_view is not None and self.bw_view._alive():
+                self.bw_view.refresh(len(new))
+
+    def bw_clear(self):
+        """清空今日记录（R-14）：引擎清事件 + 停盘清空，视图回顶部。"""
+        try:
+            self.bw_engine.clear_events()
+        except Exception as ex:
+            self._dbg(f"bw 清空失败: {ex!r}")
+        if self.bw_view is not None and self.bw_view._alive():
+            self.bw_view.reset_view()
 
     def _rebuild(self):
         """重建画布并重绑事件（折叠/换肤/重载配置都会走这里）。"""
@@ -4058,6 +4510,8 @@ class Panel:
             self.amt_level = "L2"
         # 盘面速览显隐同理：sview_on 重读后对齐窗口与 worker（R10 T005）
         self.toggle_sview(bool(self.cfg.get("sview_on")))
+        # 板块异动显隐同理（block_on 重读后对齐小窗与轮询线程）
+        self.toggle_block(bool(self.cfg.get("block_on")))
         self._rebuild()
         # 主题可能变了：菜单颜色与对勾位图要按新主题重画（_build_menu
         # 会顺带重建 img_chk_*，旧菜单对象整体替换，无引用残留）
@@ -4206,6 +4660,479 @@ def foreign_fullscreen():
         return False
 
 
+def menu_topmost(menu):
+    """把 Tk 弹出的菜单窗口提到 topmost 带（BUG-14 续）。
+
+    实测本机 Tk 的 popup 菜单是一个独立的 WS_POPUP 顶层窗口，扩展样式里
+    **没有** WS_EX_TOPMOST；而本程序的悬浮窗一律 `-topmost`，于是菜单永远
+    被压在下面——矮窗（盘面速览单行条）表现为「菜单被遮挡」，高窗（板块
+    异动 340×420）整块被盖住，看起来就像「一闪而过」。
+    这里给菜单句柄补 topmost，菜单才会浮在悬浮窗之上。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                   ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        u.SetWindowPos.restype = wintypes.BOOL
+        hwnd = int(menu.winfo_id())
+        if hwnd:
+            # HWND_TOPMOST(-1)，NOMOVE|NOSIZE|NOACTIVATE：只调层级不动别的
+            u.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0,
+                           0x0002 | 0x0001 | 0x0010)
+    except Exception:
+        pass
+
+
+def _win_btn_down(vk):
+    """按键是否按住（或刚按下过）：0x8000 当前态 | 0x0001 历史位。
+
+    用 0x0001 抓「按下即松开」的快速点击——只轮询 0x8000 会漏掉 55ms 内
+    完成的点击。
+    """
+    try:
+        import ctypes
+        v = ctypes.windll.user32.GetAsyncKeyState(vk)
+        return bool(v & 0x8001)
+    except Exception:
+        return False
+
+
+def _win_btn_new(vk):
+    """按键是否「自上次查询以来刚按下过」（只看历史位，不看当前按住态）。
+
+    菜单是在右键按下时弹出的，那一刻右键本来就按着；若按 0x8000 判定
+    「再按一次右键就关闭」，菜单会在弹出后第一轮就被自己关掉。
+    """
+    try:
+        import ctypes
+        v = ctypes.windll.user32.GetAsyncKeyState(vk)
+        return bool(v & 0x0001)
+    except Exception:
+        return False
+
+
+def _win_cursor():
+    """当前鼠标屏幕坐标（物理像素，与 winfo_pointerxy 的缩放口径不同）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        p = _PT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
+        return p.x, p.y
+    except Exception:
+        return None
+
+
+class PopupMenu:
+    """自绘右键菜单（BUG-14 根治）：Toplevel + Canvas，圆角与配色跟悬浮窗同款。
+
+    为什么弃用 tk.Menu：Tk 的菜单自身是独立的 WS_POPUP 窗口，post 时要求宿主
+    窗口处于**激活**态。本程序的悬浮窗一律 `overrideredirect(True)`，系统侧拿
+    不到前台激活权，菜单 post 完就被 unpost —— 这就是「一闪而过」；而被置顶
+    悬浮窗压住则是另一个叠加因素（补 SetWindowPos 只能消掉这一半）。主窗是 Tk
+    根窗、可以激活，所以主窗菜单一直正常，这也解释了症状为何只出现在两个子窗。
+
+    自绘后层级、悬停、关闭时机全部自控：外部点击检测走 GetAsyncKeyState 轮询，
+    不依赖 grab / focus（无边框窗这两样都不可靠）。
+    """
+
+    RH = 30          # 普通行高（逻辑像素）
+    SEH = 9          # 分隔线行高
+    PADV = 6         # 上下留白
+    PADH = 13        # 左右留白
+    MINW = 104       # 最小宽度
+    POLL = 55        # 外部点击检测间隔（毫秒）
+
+    def __init__(self, app, items, theme, x, y, host=None):
+        """items: [(label, command)]；label 为 "-" 表示分隔线。
+
+        host：宿主悬浮窗（需有 .win 与 ._menu_open）。菜单显示期间把宿主临时
+        解除置顶——两者都是 overrideredirect + topmost 的兄弟窗口，属于同进程
+        同层，谁压谁无法靠 lift/SetWindowPos 稳定控制（实测反复被宿主盖住，
+        表现成「一闪而过」或「菜单被遮挡」）。让宿主退位是最确定的方案。
+        """
+        self.app, self.t = app, theme
+        self.px = app.px
+        self.f = tkfont.Font(family=app.f_cn, size=9)
+        self.items = [(str(a), b) for a, b in items]
+        self.host = host
+        self.win = self.cv = None
+        self.closed = False
+        self._rows = []          # [(y0, y1, item_idx, rect, text_item)]
+        self._hot = -1
+        self._born = time.monotonic()   # 建窗即计时（show 再刷新一次）
+        self._build(x, y)
+
+    # ---------- 构建 ----------
+    def _size(self):
+        p = self.px
+        labels = [lab for lab, _ in self.items if lab != "-"]
+        w = max([self.f.measure(s) for s in labels] or [0]) + p(self.PADH) * 2
+        w = max(w, p(self.MINW))
+        h = p(self.PADV) * 2 + sum(p(self.SEH if lab == "-" else self.RH)
+                                   for lab, _ in self.items)
+        return w, h
+
+    def _round(self, x0, y0, x1, y1, r, fill):
+        """圆角矩形：竖中带 ∪ 横中带 ∪ 四个 1/4 圆盘（与悬浮窗同一手法）。"""
+        c = self.cv
+        c.create_rectangle(x0 + r, y0, x1 - r, y1, fill=fill, outline="")
+        c.create_rectangle(x0, y0 + r, x1, y1 - r, fill=fill, outline="")
+        for bx, by, st in ((x0, y0, 90), (x1 - 2 * r, y0, 0),
+                           (x0, y1 - 2 * r, 180), (x1 - 2 * r, y1 - 2 * r, 270)):
+            c.create_arc(bx, by, bx + 2 * r, by + 2 * r, start=st, extent=90,
+                         style="pieslice", fill=fill, outline="")
+
+    def _build(self, x, y):
+        p, t = self.px, self.t
+        w, h = self._size()
+        sw, sh = self.app.root.winfo_screenwidth(), self.app.root.winfo_screenheight()
+        if x + w > sw:               # 右侧放不下：往左翻，别露出屏幕
+            x = max(0, x - w)
+        if y + h > sh:               # 下方放不下：往上翻（右键默认点即原点）
+            y = max(0, y - h)
+        win = tk.Toplevel(self.app.root)
+        win.withdraw()               # 先摆好再显示，避免左上角闪一帧
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-transparentcolor", KEY)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        cv = tk.Canvas(win, width=w, height=h, bg=KEY, highlightthickness=0, bd=0)
+        cv.pack()
+        self.win, self.cv = win, cv
+        # 外圈边框 + 内层底：先整块铺底再画圆角，否则四角缺口会漏出下层内容
+        self._round(0, 0, w - 1, h - 1, p(8), t["line"])
+        self._round(1, 1, w - 2, h - 2, p(7), t["head"])
+        cy = p(self.PADV)
+        for idx, (lab, _) in enumerate(self.items):
+            if lab == "-":
+                ly = cy + p(self.SEH) // 2
+                cv.create_line(p(self.PADH), ly, w - p(self.PADH), ly,
+                               fill=t["line"])
+                cy += p(self.SEH)
+                continue
+            y1 = cy + p(self.RH)
+            rect = cv.create_rectangle(p(4), cy + p(2), w - p(4), y1 - p(2),
+                                       fill=t["head"], outline="")
+            txt = cv.create_text(p(self.PADH), (cy + y1) // 2, anchor="w",
+                                 text=lab, fill=t["text"], font=self.f)
+            self._rows.append((cy, y1, idx, rect, txt))
+            cy = y1
+        cv.bind("<Motion>", self._motion)
+        cv.bind("<Leave>", lambda e: self._hot_to(-1))
+
+    # ---------- 交互 ----------
+    def _motion(self, e):
+        for y0, y1, idx, _, _ in self._rows:
+            if y0 <= e.y < y1:
+                self._hot_to(idx)
+                return
+        self._hot_to(-1)
+
+    def _hot_to(self, idx):
+        if idx == self._hot:
+            return
+        t = self.t
+        for _, _, i, rect, txt in self._rows:
+            on = i == idx
+            self.cv.itemconfigure(rect, fill=t["sel"] if on else t["head"])
+            self.cv.itemconfigure(txt, fill=t["sel_fg"] if on else t["text"])
+        self._hot = idx
+
+    def show(self):
+        self._born = time.monotonic()
+        # 宿主退位：先解除宿主置顶，菜单（topmost）就必然浮在它之上。
+        # 菜单生命只有几秒，关掉立刻恢复，用户感知不到宿主掉层。
+        if self.host is not None:
+            try:
+                self.host._menu_open = True
+                self.host.win.attributes("-topmost", False)
+            except Exception:
+                pass
+        self.win.deiconify()
+        self.win.lift()
+        self.win.update_idletasks()
+        self._raise()
+        _win_btn_down(0x01)          # 清掉左键历史按下位，免得开窗就被判「点了外面」
+        _win_btn_new(0x02)
+        self.win.after(self.POLL, self._poll)
+        return self
+
+    def _raise(self):
+        """把菜单顶到 topmost 组最前（Win32 直调）。
+
+        菜单显示期间宿主已被主动解除置顶（见 show/close），这里只需常规
+        置顶，菜单就稳稳浮在宿主与其它窗口之上。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            u.GetAncestor.restype = wintypes.HWND
+            u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                       wintypes.UINT]
+            u.SetWindowPos.restype = wintypes.BOOL
+            hwnd = u.GetAncestor(int(self.win.winfo_id()), 2)   # winfo_id 是 Tk 子窗
+            if hwnd:
+                u.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0,   # HWND_TOPMOST
+                               0x0002 | 0x0001 | 0x0010)   # NOMOVE|NOSIZE|NOACTIVATE
+        except Exception:
+            pass
+
+    def _poll(self):
+        if self.closed:
+            return
+        try:
+            # 轮询同时充当「保位」：宿主小窗（BView/SView）是 topmost 且会重绘，
+            # 只要它被系统抬一次，菜单就整块沉到下面——看起来就是「闪一下没了」
+            # 或「菜单在但被窗盖住」。每轮把菜单重新顶回最前。
+            self._raise()
+            # 开窗头 150ms 是「宽限期」：右键此刻多半还没松开，且鼠标可能正从
+            # 原位置移过来，这期间只更新位置判断，不响应任何关闭条件
+            grace = time.monotonic() - self._born < 0.15
+            pos = _win_cursor()
+            inside = pos is not None and self._inside(*pos)
+            # hover 也走轮询：无边框置顶窗收不到系统的 WM_MOUSEMOVE（<Motion>
+            # 实测不触发），只靠 canvas 绑定的话菜单永远是「点得动但不高亮」。
+            try:
+                self._hot_to(self._hit(pos[1]) if inside else -1)
+            except Exception:
+                pass
+            if _win_btn_down(0x01):                      # 左键（含快速点按）
+                if inside:
+                    idx = self._hit(pos[1])
+                    if idx is not None:
+                        self._invoke(idx)
+                        return
+                if not grace:
+                    self.close()
+                    return
+            if not grace and (_win_btn_new(0x02) or _win_btn_new(0x1B)):
+                self.close()                             # 另一次右键 / Esc
+                return
+        except Exception:
+            pass
+        self.win.after(self.POLL, self._poll)
+
+    def _inside(self, gx, gy):
+        try:
+            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
+            return (x <= gx < x + self.win.winfo_width()
+                    and y <= gy < y + self.win.winfo_height())
+        except Exception:
+            return False
+
+    def _hit(self, gy):
+        ly = gy - self.win.winfo_rooty()
+        for y0, y1, idx, _, _ in self._rows:
+            if y0 <= ly < y1:
+                return idx
+        return None
+
+    def _invoke(self, idx):
+        cmd = self.items[idx][1]
+        self.close()
+        if cmd is not None:
+            try:
+                cmd()
+            except Exception:
+                pass
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        if self.host is not None:            # 宿主复位：恢复置顶并解除抑制
+            try:
+                self.host._menu_open = False
+                self.host.sync_top()
+            except Exception:
+                pass
+
+
+class BlockEngine:
+    """板块异动判定引擎（T004/T007；裁决 D3 独立可纯测）。
+
+    输入是「一轮快照 + 当前时刻」，输出是本轮新增事件；不碰 tkinter、不发
+    请求、不读配置（存档路径走模块常量）。221 个板块 × 13 点判定全是纯计算，
+    selftest 可直测——塞进 UI 类就无法测了。
+
+    内存：`series` 保存每板块 6 分钟时序（deque maxlen=13，30 秒一点），
+    `last` 保存去重基准，`events` 倒序（0 = 最新）。
+    """
+
+    def __init__(self):
+        self.series = {}      # code -> deque[(ts, pct, amt)]
+        self.last = {}        # code -> (ts, dir, lvl)
+        self.events = []      # 当日事件，索引 0 最新
+        self.date = ""        # 存档所属交易日（R-19）
+        self.frozen = False   # 中断冻结（R-15）：时序不再推进
+
+    # ---------- 判定 ----------
+    def feed(self, snap, now):
+        """推进一轮快照 → 本轮新增事件列表（可能为空）。
+
+        R-01 时序：每板块 append 并淘汰 360 秒外的旧点；同一轮重复（同 ts）
+        跳过；成交额回退（数据抖动/接口回退）本轮跳过该板块且不追加时序
+        （§3.6），否则会拿回退值算出一个负增量的假异动。
+        R-09 排序：同轮多块触发时按涨速绝对值**升序**逐条 insert(0)——倒插后
+        首行是最强者；按降序遍历会得到反向结果。
+        """
+        if self.frozen or not snap:
+            return []
+        new = []
+        for code, s in snap.items():
+            if s["members"] < BW_MIN_MEMBERS:
+                continue                      # M-01：成分股 < 5 不判定
+            ser = self.series.get(code)
+            if ser is None:
+                ser = self.series[code] = deque(maxlen=BW_KEEP_N)
+            if ser:
+                last_ts, _p, last_amt = ser[-1]
+                if abs(now - last_ts) < 1e-6:
+                    continue                  # 同一轮重复
+                if s["amt"] < last_amt:
+                    continue                  # 成交额回退
+            ser.append((now, s["pct"], s["amt"]))
+            while ser and ser[0][0] < now - BW_KEEP:
+                ser.popleft()
+            ev = self._judge(code, s, ser, now)
+            if ev is not None:
+                new.append(ev)
+        for ev in sorted(new, key=lambda e: abs(e["pct"])):
+            self.events.insert(0, ev)
+        self._trim()
+        return new
+
+    def _judge(self, code, s, ser, now):
+        """单板块判定（R-02~R-07）：取窗 → 涨速 → 放量 → 去重升档。"""
+        w = bw_window(ser, now)
+        if w is None:
+            return None
+        pct_then, amt_then, span = w
+        if not (BW_SPAN_MIN <= span <= BW_SPAN_MAX):
+            return None            # R-02/D10：丢轮时宁可少报，不把 3.5 分钟当 3 分钟
+        ts_then = now - span
+        diff = s["pct"] - pct_then
+        # 前窗对称校验（R-03）：跨度同样要在 ±15 秒内，否则 inc0 偏大、比值偏低
+        cut = None
+        for it in ser:
+            if it[0] <= ts_then - BW_WIN:
+                cut = it
+            else:
+                break
+        inc0 = None
+        if cut is not None and BW_SPAN_MIN <= ts_then - cut[0] <= BW_SPAN_MAX:
+            inc0 = amt_then - cut[2]
+        inc1 = s["amt"] - amt_then
+        hit, lvl, mult, unverified = bw_verdict(diff, s["pct"], inc1, inc0)
+        if not hit:
+            return None
+        d = "up" if diff > 0 else "down"          # R-07
+        upgrade = False
+        prev = self.last.get(code)
+        if prev is not None and prev[1] == d and now - prev[0] < BW_DEDUP:
+            if lvl <= prev[2]:
+                return None                       # R-06：同向未升档 → 丢弃
+            upgrade = True                        # 升档追加
+        self.last[code] = (now, d, lvl)
+        return {"ts": now, "t": datetime.fromtimestamp(now).strftime("%H:%M"),
+                "code": code, "name": s["name"], "dir": d,
+                "pct": round(diff, 2), "lvl": lvl,
+                "mult": (round(mult, 1) if mult is not None else None),
+                "unverified": bool(unverified), "cur": round(s["pct"], 2),
+                "lead": s.get("lead") or "",
+                "lead_pct": round(float(s.get("lead_pct") or 0.0), 2),
+                "upgrade": upgrade}
+
+    def _trim(self):
+        """R-08：容量裁剪，保留最新 BW_MAX 条。"""
+        if len(self.events) > BW_MAX:
+            del self.events[BW_MAX:]
+
+    # ---------- 生命周期 ----------
+    def reset_series(self):
+        """清空时序并解冻（R-16）：重新显示 / 中断恢复 / 跨日三情形共用。"""
+        self.series.clear()
+        self.frozen = False
+
+    def freeze(self):
+        """中断冻结（R-15）：时序停推，列表保持不动。"""
+        self.frozen = True
+
+    def clear_events(self):
+        """清空今日记录（R-14）：**不动时序、不动 last**。
+
+        清空后若时序与去重基准一起清掉，下一条快照会立刻把同一次异动重报一遍。
+        """
+        self.events = []
+        self.save()
+
+    # ---------- 存档（R-18/R-19） ----------
+    def save(self):
+        """事件落盘：临时文件 + os.replace 原子替换（半截 JSON 会让当日全丢）。"""
+        obj = {"date": self.date or datetime.now().strftime("%Y-%m-%d"),
+               "events": self.events}
+        tmp = BW_EVENTS_FILE + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+            os.replace(tmp, BW_EVENTS_FILE)
+            return True
+        except Exception:
+            log_once("block_events 写入失败")
+            return False
+
+    def load(self, today):
+        """按交易日装载存档（R-19）→ 恢复条数。
+
+        日期不符即清空并覆盖存档（次日开盘不再读一遍旧日）；同日期恢复列表与
+        计数，并从事件重建 `last`——重启后去重窗口不该失效。
+        """
+        self.date = today
+        self.events = []
+        self.last = {}
+        data = load_json(BW_EVENTS_FILE, None)
+        if not isinstance(data, dict):
+            if data is not None:
+                log_once("block_events 读取失败")
+            return 0
+        if str(data.get("date") or "") != today:
+            self.save()
+            return 0
+        for ev in (data.get("events") or []):
+            if isinstance(ev, dict):
+                self.events.append(ev)
+                if len(self.events) >= BW_MAX:
+                    break
+        for ev in self.events:
+            try:
+                ts = float(ev.get("ts"))
+                lvl = int(ev.get("lvl") or 0)
+            except (TypeError, ValueError):
+                continue
+            code = str(ev.get("code") or "")
+            if not code:
+                continue
+            prev = self.last.get(code)
+            if prev is None or ts > prev[0]:
+                self.last[code] = (ts, ev.get("dir") or "up", lvl)
+        return len(self.events)
+
+
 class SView:
     """盘面速览悬浮框（R10 T004/T007/T008）：单行四段 + 休市标记。
 
@@ -4256,13 +5183,23 @@ class SView:
         self._tip_after = None       # 300ms 延时句柄
         self._tip_slot = None        # 指针当前所在热区（变化才重启延时）
         self._tip_rows = None       # 最近一次绘制内容（不变则不重绘，避免闪烁）
-        for w in (self.win, self.cv):
-            w.bind("<Button-1>", self.press)
-            w.bind("<B1-Motion>", self.drag)
-            w.bind("<ButtonRelease-1>", self.drop)
-            w.bind("<Button-3>", self.menu)
-            w.bind("<Motion>", self.motion)
-            w.bind("<Leave>", self.leave)
+        self._tip_size = None        # 浮层像素尺寸（变化才整块重建边框）
+        self._tip_theme = None       # 浮层当前套用的主题（变化要整块重建）
+        self._tr_geo = None          # 走势图区几何与序列（供指针定位，R-16）
+        self._hover_after = None     # 指针定位轮询句柄（R-16）
+        # 右键菜单改用自绘 PopupMenu（BUG-14），每次点击现建现销，无需缓存
+        self._menu_ts = 0.0          # 上次弹出时刻（同一次右键的重复投递兜底）
+        self._menu_open = False      # 右键菜单是否开着（开着时本窗不抢回置顶）
+        # 事件只绑一次（BUG-14）：画布铺满整窗，且事件沿 bindtags 从画布冒泡到
+        # 窗口（cv → Canvas → toplevel → all），若 win/cv 各绑一遍则一次右键
+        # 触发两次 menu()，同一 tick 连弹两个菜单——Windows 上前一个被立刻顶掉，
+        # 表现为右键菜单「一闪而过」。滚轮同理会一格翻两倍，一并修掉。
+        self.cv.bind("<Button-1>", self.press)
+        self.cv.bind("<B1-Motion>", self.drag)
+        self.cv.bind("<ButtonRelease-1>", self.drop)
+        self.cv.bind("<Button-3>", self.menu)
+        self.cv.bind("<Motion>", self.motion)
+        self.cv.bind("<Leave>", self.leave)
         self.win.update()            # 先完成首次映射再置顶（先例：grab 前置条件）
         self.sync_top()
         self.win.lift()
@@ -4373,11 +5310,13 @@ class SView:
             return
         try:
             top = bool(self.app.cfg.get("topmost", True))
-            try:
-                if bool(self.win.attributes("-topmost")) != top:
-                    self.win.attributes("-topmost", top)
-            except Exception:
-                pass
+            # 菜单开着时不去抢置顶：否则菜单（同为 topmost）会被本窗压住
+            if not self._menu_open:
+                try:
+                    if bool(self.win.attributes("-topmost")) != top:
+                        self.win.attributes("-topmost", top)
+                except Exception:
+                    pass
             if self.app.theme is not self.theme:
                 self.theme = self.app.theme
                 self._recolor()
@@ -4466,6 +5405,8 @@ class SView:
         if slot == self._tip_slot:
             return
         self._tip_slot = slot
+        if slot is not None and self._tip_kind == slot:
+            return                       # 浮层已在（指针从浮层移回热区）：不重排
         self._tip_cancel()
         if slot is not None and self._alive():
             try:
@@ -4489,13 +5430,11 @@ class SView:
             pass
 
     def _leave_check(self):
-        """120ms 后复核指针是否真的在窗外——在窗内（含 1px 边框）就不收。"""
+        """120ms 后复核指针是否真的在窗外——在窗内（含浮层与缝隙）就不收。"""
         if not self._alive():
             return
         try:
-            px_, py_ = self.win.winfo_pointerxy()
-            x, y = self.win.winfo_rootx(), self.win.winfo_rooty()
-            inside = (x <= px_ < x + self.W) and (y <= py_ < y + self.H)
+            inside = self._hover_zone(*self.win.winfo_pointerxy())
         except Exception:
             inside = False
         if not inside:
@@ -4508,36 +5447,22 @@ class SView:
             return
         self._tip_kind = kind
         self._tip_rows = None
+        if kind == "amt":                # 走势图数据按需取（R-15 / D12）
+            try:
+                self.app.ensure_amt_trend()
+            except Exception:
+                pass
         self._tip_fill(force=True)
 
     def _tip_rows_for(self, kind):
-        """按 kind 生成浮层文本行 [(内容, 基色), ...]。
+        """按 kind 生成浮层文本行 [(内容, 基色), ...]（白黄线段：涨跌家数）。
 
         内容为 str（整行基色）或 [(文本, 颜色), ...] 片段表；涨跌家数用片段
-        表行内分色——上涨红、下跌绿（用户口径，与行情涨跌配色一致）。量能段
-        与主窗成交额块浮层同文案（SView 侧独立生成，不依赖 Panel 私有方法，
-        §3.5）；白黄线段为沪深涨跌家数（R-14）。
+        表行内分色——上涨红、下跌绿（用户口径，与行情涨跌配色一致）。
+        量能段走 `_tip_amt_cells` 的三列版式（v1.2.2），不再用单列行表。
         """
         t = self.theme
         app = self.app
-        if kind == "amt":
-            st, axis, _note = app.calc_amt_state()
-            total, base, diff, pct, label = app._amt_values(st, axis)
-            sh, sz = app._amt_split()
-            c_diff = (t["up"] if diff and diff > 0
-                      else t["down"] if diff and diff < 0 else t["flat"])
-            pct_line = f"{pct:+.1f}%" if pct is not None else AMT_EMPTY
-            return [
-                (f"今日累计  {fmt_amount(total) if total else AMT_EMPTY}", t["text"]),
-                (f"沪 {fmt_amount(sh) if sh else AMT_EMPTY}   "
-                 f"深 {fmt_amount(sz) if sz else AMT_EMPTY}", t["sub"]),
-                (f"基准时点  {label}", t["sub"]),
-                (f"昨日基准  {fmt_amount(base) if base else AMT_EMPTY}", t["text"]),
-                (f"差额      {sv_amt_diff_text(diff)}", c_diff),
-                (f"比例      {pct_line}", c_diff),
-                ("口径  沪深两市合计", t["sub"]),
-                ("      不含北交所", t["sub"]),
-            ]
         ud = app.sv_ud
         if not ud:
             return [(f"{PLACEHOLDER_NA}（家数暂不可用）", t["flat"])]
@@ -4554,6 +5479,80 @@ class SView:
             (f"数据时点 {ud.get('at') or PLACEHOLDER_NA}", t["sub"]),
         ]
 
+    def _tip_amt_cells(self):
+        """量能浮层正文：三列两行 + 一行口径尾注（v1.2.2 版式，R-18）。
+
+        列语义是「今日 / 昨日 / 对比」，与用户看盘顺序一致；原来单列八行只
+        占左半幅、右侧整片空白，还把走势图挤到 96pt。三列后同样的信息只用
+        两行，省下的高度全给曲线。返回 (cols, foot)，cell = (标签, 片段表)，
+        标签为空串表示该行是整行细节（不与标签列对齐）。
+        """
+        t = self.theme
+        app = self.app
+        st, axis, _note = app.calc_amt_state()
+        total, base, diff, pct, label = app._amt_values(st, axis)
+        sh, sz = app._amt_split()
+        c_diff = (t["up"] if diff and diff > 0
+                  else t["down"] if diff and diff < 0 else t["flat"])
+        pct_line = f"{pct:+.1f}%" if pct is not None else AMT_EMPTY
+        cols = [
+            [("今日累计", [(fmt_amount(total) if total else AMT_EMPTY, t["text"])]),
+             ("", [("沪 ", t["sub"]),
+                   (fmt_amount(sh) if sh else AMT_EMPTY, t["sub"]),
+                   ("   深 ", t["sub"]),
+                   (fmt_amount(sz) if sz else AMT_EMPTY, t["sub"])])],
+            [("昨日基准", [(fmt_amount(base) if base else AMT_EMPTY, t["text"])]),
+             ("基准时点", [(label, t["sub"])])],
+            [("差额", [(sv_amt_diff_text(diff), c_diff)]),
+             ("比例", [(pct_line, c_diff)])],
+        ]
+        foot = ("口径", [("沪深两市合计 · 不含北交所", t["sub"])])
+        return cols, foot
+
+    def _tip_cols_at(self, cols, w, pad):
+        """三列起点与标签列宽（列宽按本列实测排，见 tip_cols_at）。"""
+        lab = [max([self.f_cn.measure(l) for l, _s in c if l] or [0])
+               for c in cols]
+        wid = []
+        for i, col in enumerate(cols):
+            m = 0
+            for label, segs in col:
+                v = sum(self.f_cn.measure(s) for s, _c in segs)
+                m = max(m, (lab[i] + self.px(6) if label else 0) + v)
+            wid.append(m)
+        return tip_cols_at(wid, w, pad, self.px(10), self.px(30)), lab
+
+    def _tip_seg_text(self, cv, x, y, segs, tag="txt"):
+        """片段表逐段落笔（行内分色），返回末 x。"""
+        for s, c in segs:
+            cv.create_text(x, y, anchor="w", text=s, fill=c,
+                           font=self.f_cn, tags=tag)
+            x += self.f_cn.measure(s)
+        return x
+
+    def _tip_amt_draw(self, cv, pad, w, y0, lh, cols, foot):
+        """量能正文落笔：两行三列 + 口径尾注（标签列对齐）。"""
+        t = self.theme
+        xs, lab = self._tip_cols_at(cols, w, pad)
+        y = y0 + lh / 2
+        for r in range(max(len(c) for c in cols)):
+            for ci, col in enumerate(cols):
+                if r >= len(col):
+                    continue
+                label, segs = col[r]
+                x = xs[ci]
+                if label:
+                    cv.create_text(x, y, anchor="w", text=label,
+                                   fill=t["sub"], font=self.f_cn, tags="txt")
+                    x += lab[ci] + self.px(6)
+                self._tip_seg_text(cv, x, y, segs)
+            y += lh
+        if foot:
+            label, segs = foot
+            cv.create_text(pad, y, anchor="w", text=label, fill=t["sub"],
+                           font=self.f_cn, tags="txt")
+            self._tip_seg_text(cv, pad + lab[0] + self.px(6), y, segs)
+
     @staticmethod
     def _tip_segs(row, base):
         """行内容归一为 [(文本, 颜色), ...]：str 行整行用基色，片段表保持各段色。"""
@@ -4562,42 +5561,285 @@ class SView:
         return [(s, c or base) for s, c in row if s]
 
     def _tip_fill(self, force=False):
-        """绘制浮层。内容未变直接返回——tick 每秒调用，整窗重绘会闪。"""
+        """绘制浮层。量能段含走势图（R-15）：曲线每秒重画，文字仅变化时重排。
+
+        三套 tag 分开管理——frame（边框，尺寸变了才重建）、txt（文字）、
+        trend（曲线 + 网格 + 刻度 + 图例）。tick 每秒调用，若整块 delete("all")
+        重画，文字会跟着闪；分 tag 后只有曲线区在动。
+
+        v1.2.2：量能浮层改为「与悬浮框同宽 + 三列两行 + 口径尾注」——单列
+        八行时右侧整片空白、图区被挤到 96pt；改版后文字两行排完，省出的
+        高度全部给曲线（SV_TREND_H 150）。
+        """
         kind = self._tip_kind
         if not kind:
             return
         try:
-            rows = self._tip_rows_for(kind)
-            if not force and rows == self._tip_rows:
-                return
-            self._tip_rows = rows
+            trend = (kind == "amt")
             t = self.theme
             pad, lh = self.px(9), self.px(16)
-            lines = [self._tip_segs(r, c) for r, c in rows]
-            # measure 与实际落笔在 150% 缩放下有偏差，按 1.08 放宽（主窗浮层同款）；
-            # 分色行按片段累加量宽，与实际落笔方式一致
-            w = int(max(sum(self.f_cn.measure(s) for s, _c in segs)
-                        for segs in lines) * 1.08) + pad * 2
-            h = lh * len(rows) + pad * 2
+            th = self.px(SV_TREND_H) if trend else 0
+            tx = self.px(15) if trend else 0      # x 轴刻度行
+            gap = self.px(6) if trend else 0
+            if trend:
+                cols, foot = self._tip_amt_cells()
+                nrow = max(len(c) for c in cols) + 1     # +1 为口径尾注
+                sig = (tuple(tuple(c) for c in cols), tuple(foot))
+                # 浮层与悬浮框同宽（v1.2.2 用户口径），图区随之拉宽
+                w = max(self.W, self.px(SV_TREND_W) + pad * 2)
+                lines = None
+            else:
+                lines = [self._tip_segs(r, c)
+                         for r, c in self._tip_rows_for(kind)]
+                nrow = len(lines)
+                sig = tuple(tuple(l) for l in lines)
+                # measure 与实际落笔在 150% 缩放下有偏差，按 1.08 放宽（主窗
+                # 浮层同款）；分色行按片段累加量宽，与实际落笔方式一致
+                w = int(max(sum(self.f_cn.measure(s) for s, _c in l)
+                            for l in lines) * 1.08) + pad * 2
+            h = lh * nrow + pad * 2 + th + tx + gap
             if self.tip is None or not self.tip.winfo_exists():
                 self._tip_create()
             cv = self.tip_cv
-            cv.delete("all")
-            cv.configure(width=w, height=h)
-            cv.create_rectangle(0, 0, w - 1, h - 1,
-                                fill=t["head"], outline=t["line"])
-            y = pad + lh / 2
-            for segs in lines:
-                x = pad
-                for seg, col in segs:
-                    cv.create_text(x, y, anchor="w", text=seg, fill=col,
-                                   font=self.f_cn)
-                    x += self.f_cn.measure(seg)
-                y += lh
+            resized = (self._tip_size != (w, h)) or (self._tip_theme is not t)
+            if resized:
+                cv.delete("all")
+                cv.configure(width=w, height=h, bg=t["head"])
+                try:                          # Toplevel 自身底色也要跟着换
+                    self.tip.configure(bg=t["head"])
+                except Exception:
+                    pass
+                cv.create_rectangle(0, 0, w - 1, h - 1, fill=t["head"],
+                                    outline=t["line"], tags="frame")
+                self._tip_size = (w, h)
+                self._tip_theme = t
+                self._tip_rows = None
+            if resized or force or sig != self._tip_rows:
+                self._tip_rows = sig
+                cv.delete("txt")
+                if trend:
+                    self._tip_amt_draw(cv, pad, w, pad + th + tx + gap,
+                                       lh, cols, foot)
+                else:
+                    y = pad + lh / 2
+                    for segs in lines:
+                        self._tip_seg_text(cv, pad, y, segs)
+                        y += lh
+            if trend:
+                cv.delete("trend")                # 曲线跟随行情，每秒重画
+                self._tip_trend(cv, pad, pad, w - pad * 2, th)
             self._tip_place(w, h)
         except Exception as ex:
             self.app._dbg(f"sv tip 异常: {ex!r}")
             self._tip_cancel()
+
+    def _tip_trend(self, cv, x0, y0, w, h):
+        """量能走势折线（T019 / PRD R-15）：今日实线 vs 昨日同期虚线。
+
+        x 轴固定 0..240（全天），按 SV_TREND_STEP 抽点；午休在轴 120 处折成
+        一条竖虚线（不占宽度）。今日线尾用实时两市累计额对齐当前分钟——缓存
+        最多落后一个 TTL，但线尾不能停在旧值，否则「实时变化」名不副实。
+        """
+        t, f = self.theme, self.f_s
+        # 网格（0 / 50% / 100%）与午休分界
+        cv.create_line(x0, y0 + h, x0 + w, y0 + h, fill=t["line"], tags="trend")
+        for i in (1, 2):
+            y = y0 + h - h * i / 2.0
+            cv.create_line(x0, y, x0 + w, y, fill=t["line"],
+                           dash=(1, 3), tags="trend")
+        xm = x0 + w * 120.0 / 240.0
+        cv.create_line(xm, y0, xm, y0 + h, fill=t["line"],
+                       dash=(2, 2), tags="trend")
+        # x 轴刻度：11:30 与 13:00 同轴，合标一处
+        ty = y0 + h + self.px(7)
+        for ax, txt, anc in ((0, "09:30", "w"), (120, "11:30 / 13:00", "center"),
+                             (240, "15:00", "e")):
+            cv.create_text(x0 + w * ax / 240.0, ty, anchor=anc, text=txt,
+                           fill=t["sub"], font=f, tags="trend")
+        app = self.app
+        tr = app.amt_trend
+        if not tr:
+            msg = "走势暂不可用" if app.amt_trend_fail else "走势加载中…"
+            cv.create_text(x0 + w / 2, y0 + h / 2, anchor="center", text=msg,
+                           fill=t["sub"], font=f, tags="trend")
+            return
+        prev = tr.get("prev") or []
+        tp = amt_trend_points(tr.get("today") or [], tr.get("last_ax", -1))
+        st, ax, _note = app.calc_amt_state()
+        live = app._amt_today() if st == "S2" else None
+        if live and ax is not None and tp:
+            tp = [(a, v) for a, v in tp if a < ax]
+            tp.append((ax, live))
+        pp = amt_trend_points(prev, len(prev) - 1) if prev else []
+        ymax = amt_trend_scale(tp[-1][1] if tp else None,
+                               pp[-1][1] if pp else None)
+        if ymax <= 0:
+            cv.create_text(x0 + w / 2, y0 + h / 2, anchor="center",
+                           text="走势暂不可用", fill=t["sub"], font=f,
+                           tags="trend")
+            return
+
+        def xy(pts):
+            out = []
+            for a, v in pts:
+                out.append(x0 + w * a / 240.0)
+                out.append(y0 + h - h * max(0.0, min(float(v), ymax)) / ymax)
+            return out
+
+        if len(pp) > 1:
+            cv.create_line(*xy(pp), fill=t["sub"], width=1,
+                           dash=SV_TREND_DASH, tags="trend")
+        if len(tp) > 1:
+            cv.create_line(*xy(tp), fill=t["text"], width=2, tags="trend")
+        # 图例：左上角垫主题底色，避免压住曲线看不清
+        lh2 = self.px(13)
+        cv.create_rectangle(x0, y0, x0 + self.px(178), y0 + lh2 * 2,
+                            fill=t["head"], outline="", tags="trend")
+        tv = tp[-1][1] if tp else None
+        pv = pp[-1][1] if pp else None
+        pd = str(tr.get("prev_date") or "")[5:]
+        cv.create_line(x0 + self.px(4), y0 + lh2 * 0.5,
+                       x0 + self.px(15), y0 + lh2 * 0.5,
+                       fill=t["text"], width=2, tags="trend")
+        cv.create_text(x0 + self.px(19), y0 + lh2 * 0.5, anchor="w",
+                       text="今日 " + (fmt_amount(tv) if tv else PLACEHOLDER_NA),
+                       fill=t["text"], font=f, tags="trend")
+        cv.create_line(x0 + self.px(4), y0 + lh2 * 1.5,
+                       x0 + self.px(15), y0 + lh2 * 1.5,
+                       fill=t["sub"], width=1, dash=SV_TREND_DASH, tags="trend")
+        cv.create_text(x0 + self.px(19), y0 + lh2 * 1.5, anchor="w",
+                       text="昨日全天 " + (fmt_amount(pv) if pv else PLACEHOLDER_NA)
+                       + (f" · {pd}" if pd else ""),
+                       fill=t["sub"], font=f, tags="trend")
+        # 指针定位（R-16）：几何与序列留给轮询复用，末轴之后的今日段无值
+        self._tr_geo = {"x0": x0, "y0": y0, "w": w, "h": h, "ymax": ymax,
+                        "today": tr.get("today") or [], "prev": prev,
+                        "last": tp[-1][0] if tp else -1}
+        self._hover_draw()
+
+    def _hover_draw(self):
+        """指针所在轴：竖线 + 两条曲线上的点 + 读数标签（T020 / R-16）。
+
+        浮层整体点击穿透（_tip_click_through），收不到 <Motion>，坐标只能
+        主动取全局指针再换算到浮层内；换算原点是浮层自身 rootx/rooty。
+        指针在图区外（含浮层下部文字区）时只撤定位件，不动浮层。
+        """
+        cv, g = self.tip_cv, self._tr_geo
+        if cv is None or g is None:
+            return
+        try:
+            if not cv.winfo_exists():
+                return
+            px = self.tip.winfo_pointerx() - self.tip.winfo_rootx()
+            py = self.tip.winfo_pointery() - self.tip.winfo_rooty()
+        except Exception:
+            return
+        cv.delete("hover")                       # 先撤旧件，越界即自然清空
+        x0, y0, w, h = g["x0"], g["y0"], g["w"], g["h"]
+        if not (x0 <= px <= x0 + w and y0 <= py <= y0 + h):
+            return
+        ax = max(0, min(240, int(round((px - x0) * 240.0 / w))))
+        t, f, ymax = self.theme, self.f_s, g["ymax"]
+        today, prev, last = g["today"], g["prev"], g["last"]
+
+        def ymap(v):
+            return y0 + h - h * max(0.0, min(float(v), ymax)) / ymax
+
+        cx = x0 + w * ax / 240.0
+        cv.create_line(cx, y0, cx, y0 + h, fill=t["sub"], width=1,
+                       dash=(2, 3), tags="hover")
+        # 今日只到 last（盘中末轴），右侧未走到的时段按无值处理
+        tv = today[ax] if (today and ax <= last and ax < len(today)) else None
+        pv = prev[ax] if (prev and ax < len(prev)) else None
+        for v, col, r in ((pv, t["sub"], 3), (tv, t["text"], 3)):
+            if v:
+                cv.create_oval(cx - r, ymap(v) - r, cx + r, ymap(v) + r,
+                               fill=col, outline=t["head"], tags="hover")
+        # 读数标签（v1.2.1 用户口径）：今日值与差额按涨跌分色——今日高于
+        # 昨日同期 → 红、低于 → 绿（与行情涨跌配色一致）；差额用
+        # sv_amt_diff_text 同款箭头 + 带符号金额。行内分色沿用片段表绘制。
+        tv_c = t["text"]
+        if tv is not None and pv:
+            tv_c = t["up"] if tv > pv else (t["down"] if tv < pv else t["text"])
+        diff = (tv - pv) if (tv is not None and pv is not None) else None
+        diff_c = (t["up"] if diff and diff > 0
+                  else t["down"] if diff and diff < 0 else t["flat"])
+        seg1 = [(f"{amt_ax_time(ax)}  ", t["sub"]),
+                ("今日 ", t["sub"]),
+                (fmt_amount(tv) if tv else PLACEHOLDER_NA, tv_c)]
+        seg2 = [("昨日同期 ", t["sub"]),
+                (fmt_amount(pv) if pv else PLACEHOLDER_NA, t["text"]),
+                ("   差 ", t["sub"]),
+                (sv_amt_diff_text(diff) if diff is not None else PLACEHOLDER_NA,
+                 diff_c)]
+        lh, pad = self.px(13), self.px(5)
+        bw = int(max(sum(f.measure(s) for s, _c in sg) for sg in (seg1, seg2))
+                 * 1.10) + pad * 2
+        bh = lh * 2 + pad * 2 - self.px(3)
+        bx = cx + self.px(10)
+        if bx + bw > x0 + w:
+            bx = cx - self.px(10) - bw
+        bx = max(x0, bx)
+        by = py - bh - self.px(10)
+        if by < y0:
+            by = py + self.px(12)
+        by = max(y0, min(by, y0 + h - bh))
+        cv.create_rectangle(bx, by, bx + bw, by + bh, fill=t["head"],
+                            outline=t["line"], tags="hover")
+        for sg, sy in ((seg1, 0), (seg2, 1)):
+            x = bx + pad
+            for s, c in sg:
+                cv.create_text(x, by + pad + lh * sy, anchor="nw", text=s,
+                               fill=c, font=f, tags="hover")
+                x += f.measure(s)
+
+    def _hover_zone(self, px, py):
+        """指针是否在「悬浮框 ∪ 浮层（含上下各 8px 缝隙）」内（R-16）。
+
+        浮层与悬浮框之间有 6px 间距，鼠标从热区挪向浮层会经过它；只判
+        单窗会把这段算成「已离开」，浮层在途中就被收掉。
+        """
+        try:
+            wx, wy = self.win.winfo_rootx(), self.win.winfo_rooty()
+            if wx <= px < wx + self.W and wy <= py < wy + self.H:
+                return True
+            if self.tip is not None and self.tip.winfo_exists():
+                tx, ty = self.tip.winfo_rootx(), self.tip.winfo_rooty()
+                m = self.px(8)
+                if (tx <= px < tx + self.tip.winfo_width()
+                        and ty - m <= py < ty + self.tip.winfo_height() + m):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _hover_tick(self):
+        """指针定位轮询（R-16）：取全局坐标 → 画定位件；出了浮层区即收浮层。
+
+        原 _leave_check 只认悬浮框矩形，指针停在浮层上时会被判成「已离开」
+        并收掉浮层——指针定位就永远用不了。这里把浮层并入判定，并兼作
+        浮层的存活守卫（浮层穿透，SView 拿不到它上面的任何事件）。
+        """
+        self._hover_after = None
+        if not self._alive():
+            return
+        if self.tip is None or self._tip_kind != "amt":
+            return                               # 浮层已收或非量能段：停轮询
+        try:
+            if not self.tip.winfo_exists():
+                return
+            px, py = self.win.winfo_pointerxy()
+            if not self._hover_zone(px, py):
+                self._tip_slot = None
+                self._tip_cancel()
+                return
+            self._hover_draw()
+        except Exception as ex:
+            self.app._dbg(f"sv hover 异常: {ex!r}")
+        try:
+            self._hover_after = self.win.after(SV_HOVER_MS, self._hover_tick)
+        except Exception:
+            self._hover_after = None
 
     def _tip_create(self):
         """无边框置顶浮层；以悬浮框为父，主窗销毁时一并回收。"""
@@ -4611,7 +5853,14 @@ class SView:
         cv = tk.Canvas(w, bg=self.theme["head"], highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
         self.tip, self.tip_cv = w, cv
+        self._tip_theme = self.theme
         self._tip_click_through(w)
+        # 指针定位轮询（R-16）：浮层穿透，只能主动取全局坐标
+        if self._hover_after is None:
+            try:
+                self._hover_after = self.win.after(SV_HOVER_MS, self._hover_tick)
+            except Exception:
+                self._hover_after = None
 
     def _tip_click_through(self, w):
         """鼠标穿透：补 WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW。
@@ -4662,6 +5911,9 @@ class SView:
             self._tip_after = None
         self._tip_kind = None
         self._tip_rows = None
+        self._tip_size = None
+        self._tip_theme = None
+        self._tr_geo = None
         if self.tip is not None:
             try:
                 self.tip.destroy()
@@ -4694,17 +5946,16 @@ class SView:
         save_json(CONFIG_FILE, cfg)
 
     def menu(self, e):
+        now = time.monotonic()
+        if now - self._menu_ts < 0.15:
+            return                       # 同一次右键被重复投递（BUG-14 兜底）
+        self._menu_ts = now
         self._tip_slot = None
         self._tip_cancel()               # 右键菜单弹出前收浮层，避免压住菜单
-        t = self.theme
-        # 与主窗菜单同款配色（BUG-13）：高亮色跟主题走，不用硬编码深蓝
-        m = tk.Menu(self.win, tearoff=0, bg=t["head"], fg=t["text"],
-                    activebackground=t["sel"], activeforeground=t["sel_fg"],
-                    disabledforeground=t["sub"],
-                    bd=0, font=(self.f_cn, 9))
-        m.add_command(label="隐藏", command=lambda: self.app.toggle_sview(False))
-        m.add_command(label="重置位置", command=self.reset_pos)
-        m.tk_popup(e.x_root, e.y_root)
+        # 自绘菜单（BUG-14）：无边框窗上 tk.Menu 拿不到激活权，post 完即被 unpost
+        PopupMenu(self.app, [("隐藏", lambda: self.app.toggle_sview(False)),
+                             ("重置位置", self.reset_pos)],
+                  self.theme, e.x_root, e.y_root, host=self).show()
 
     def reset_pos(self):
         cfg = self.app.cfg
@@ -4713,6 +5964,530 @@ class SView:
         save_json(CONFIG_FILE, cfg)
         x = self.app.root.winfo_x()
         y = self.app.root.winfo_y() + self.app.root.winfo_height() + self.px(8)
+        x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+
+
+class BView:
+    """板块异动时间线小窗（T006/T010/T011；PRD F-02）。
+
+    无边框圆角 Toplevel：颜色键透明 + Canvas 自绘圆角（裁决 D2，**不用**
+    SetWindowRgn——设过窗口区域后新露出的区域永不重绘）。9 行 item 一次建好，
+    之后只 itemconfig/coords/state（D6）：每秒可见的窗口删了重建会整块闪白。
+    引擎事件只读；显隐、状态、置顶由 Panel 单向驱动，本类不回写引擎。
+    """
+
+    def __init__(self, app):
+        self.app = app
+        t = self.theme = app.theme
+        self.scroll = 0             # 视口顶部对应的事件下标（0 = 最新）
+        self.tip_on = False
+        self._dragging = False
+        self._yielded = False
+        self._dx = self._dy = 0
+        self._phase = None          # 上次落笔的 (状态, 条数)，变化才重排
+        self._menu_ts = 0.0         # 上次弹出时刻（重复投递兜底；菜单为自绘）
+        self._menu_open = False     # 右键菜单是否开着（开着时本窗不抢回置顶）
+        self.win = tk.Toplevel(app.root)
+        self.win.overrideredirect(True)
+        self.win.configure(bg=KEY)
+        try:
+            # Toplevel 不继承主窗透明色，必须显式设（项目既有踩坑记录）
+            self.win.attributes("-transparentcolor", KEY)
+        except Exception:
+            pass
+        self.cv = tk.Canvas(self.win, bg=KEY, highlightthickness=0, bd=0)
+        self.cv.pack(fill="both", expand=True)
+        self.f_ttl = tkfont.Font(family=app.f_cn, size=9, weight="bold")
+        self.f_nm = tkfont.Font(family=app.f_cn, size=10)
+        self.f_arw = tkfont.Font(family=app.f_cn, size=9)
+        self.f_cn = tkfont.Font(family=app.f_cn, size=8)
+        self.f_s = tkfont.Font(family=app.f_cn, size=7)
+        self.f_pct = tkfont.Font(family=app.f_num, size=10, weight="bold")
+        self.f_num = tkfont.Font(family=app.f_num, size=8)
+        self.W = self.px(BW_W)
+        self.H = self.px(BW_H)
+        self.HEAD = self.px(BW_HEAD)
+        self.ROW = self.px(BW_ROW)
+        self.VIS = BW_VIS
+        # 定宽槽位：只在这里量一次，行内一律用固定 x（列对齐靠槽位，不靠累加）
+        self.pct_w = max(self.f_pct.measure("+9.99%"), self.f_pct.measure("-9.99%"))
+        self.lvl_w = self.f_cn.measure("强")
+        self.amt_w = self.f_cn.measure("放量 9.9x")
+        self.x_time = self.px(14)
+        self.x_arw = self.px(65)
+        self.x_name = self.px(84)
+        self.x_pct = self.W - self.px(14)
+        self.x_tag = self.x_pct - self.pct_w - self.px(7)
+        self.x_amt = self.x_name + self.lvl_w + self.px(9)
+        self.x_cur = self.x_amt + self.amt_w + self.px(9)
+        self.lead_w = max(self.px(40), self.x_pct - self.x_cur - self.px(6))
+        # 位置：缺省放主窗右侧，右侧放不下改左侧，再不行贴屏幕右缘（R-10）
+        x, y = app.cfg.get("block_x"), app.cfg.get("block_y")
+        if not isinstance(x, int) or not isinstance(y, int):
+            x = app.root.winfo_x() + app.root.winfo_width() + self.px(8)
+            if x + self.W > self.win.winfo_screenwidth():
+                x = app.root.winfo_x() - self.W - self.px(8)
+            if x < 0:
+                x = self.win.winfo_screenwidth() - self.W - self.px(8)
+            y = app.root.winfo_y()
+        x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self._layout()
+        self.hot = {"qi": self._qi_box}
+        # 事件只绑一次（BUG-14，同 SView）：win 与 cv 双绑会让一次右键触发两次
+        # menu()，连弹两个菜单被 Windows 立刻顶掉 → 右键菜单一闪而过；
+        # 滚轮双绑还会一格翻两倍（3 行变 6 行），一并修掉。
+        self.cv.bind("<Button-1>", self.press)
+        self.cv.bind("<B1-Motion>", self.drag)
+        self.cv.bind("<ButtonRelease-1>", self.drop)
+        self.cv.bind("<Button-3>", self.menu)
+        self.cv.bind("<MouseWheel>", self.on_wheel)
+        self.cv.bind("<Motion>", self.motion)
+        self.cv.bind("<Leave>", self.leave)
+        self.win.update()
+        self.sync_top()
+        self.win.lift()
+        self._yield_tick()
+        self.render()
+        self.tick()
+
+    def px(self, v):
+        return int(round(v * self.app.s))
+
+    # ---------- 绘制 ----------
+    def _round(self, x0, y0, x1, y1, r, fill, tag):
+        """圆角矩形：竖中带 ∪ 横中带 ∪ 四个 1/4 圆盘（主窗同款手法）。"""
+        c = self.cv
+        c.create_rectangle(x0 + r, y0, x1 - r, y1, fill=fill, outline="", tags=tag)
+        c.create_rectangle(x0, y0 + r, x1, y1 - r, fill=fill, outline="", tags=tag)
+        for bx, by, st in ((x0, y0, 90), (x1 - 2 * r, y0, 0),
+                           (x0, y1 - 2 * r, 180), (x1 - 2 * r, y1 - 2 * r, 270)):
+            c.create_arc(bx, by, bx + 2 * r, by + 2 * r, start=st, extent=90,
+                         style="pieslice", fill=fill, outline="", tags=tag)
+
+    def _layout(self):
+        """一次性建全部 item（标题栏 6 + 9 行 × 11 + 滚动条 2 + 空态 2）。"""
+        t, c = self.theme, self.cv
+        W, H, R = self.W, self.H, self.px(BW_R)
+        # 圆角主体：底色 KEY 的区域由 -transparentcolor 透出桌面
+        self._round(0, 0, W, H, R, t["bg"], "body")
+        c.create_rectangle(R, 0, W - R, self.HEAD, fill=t["head"], outline="",
+                           tags="body")
+        c.create_arc(0, 0, 2 * R, 2 * R, start=90, extent=90, style="pieslice",
+                     fill=t["head"], outline="", tags="body")
+        c.create_arc(W - 2 * R, 0, W, 2 * R, start=0, extent=90,
+                     style="pieslice", fill=t["head"], outline="", tags="body")
+        c.tag_lower("body")
+        # 标题栏：状态圆点 / 标题 / 问号 / 状态标记 / 今日条数
+        hy = self.HEAD / 2
+        d = self.px(6)
+        self.dot = c.create_oval(self.px(14), hy - d / 2, self.px(14) + d,
+                                 hy + d / 2, fill=t["down"], outline="")
+        self.ttl = c.create_text(self.px(27), hy, anchor="w", text="板块异动",
+                                 fill=t["text"], font=self.f_ttl)
+        qx = self.px(27) + self.f_ttl.measure("板块异动") + self.px(7)
+        q = self.px(13)
+        self.qi_ring = c.create_oval(qx, hy - q / 2, qx + q, hy + q / 2,
+                                     outline=t["line"], width=1)
+        self.qi_txt = c.create_text(qx + q / 2, hy, text="?", fill=t["sub"],
+                                    font=self.f_s)
+        self._qi_box = (qx - self.px(2), qx + q + self.px(2),
+                        hy - q / 2 - self.px(4), hy + q / 2 + self.px(4))
+        self.mark = c.create_text(W - self.px(14), hy, anchor="e", text="",
+                                  fill=t["sub"], font=self.f_cn)
+        self.cnt = c.create_text(W - self.px(14), hy, anchor="e", text="今日 0 条",
+                                 fill=t["sub"], font=self.f_num)
+        # 事件行：11 个 item 固定复用，越界整行 hidden（绝不 delete/create）
+        self.rows = []
+        for i in range(self.VIS):
+            y = self.HEAD + i * self.ROW
+            r = {
+                "_y": y,
+                "t": c.create_text(self.x_time, y + self.px(12), anchor="w",
+                                   text="", fill=t["sub"], font=self.f_num),
+                "arw": c.create_text(self.x_arw, y + self.px(12), anchor="w",
+                                     text="", fill=t["up"], font=self.f_arw),
+                "name": c.create_text(self.x_name, y + self.px(12), anchor="w",
+                                      text="", fill=t["name"], font=self.f_nm),
+                "tag_box": c.create_rectangle(0, 0, 0, 0, outline=t["line"],
+                                              width=1, state="hidden"),
+                "tag_txt": c.create_text(0, 0, anchor="center", text="升级",
+                                         fill=t["sub"], font=self.f_s,
+                                         state="hidden"),
+                "pct": c.create_text(self.x_pct, y + self.px(12), anchor="e",
+                                     text="", fill=t["up"], font=self.f_pct),
+                "lvl": c.create_text(self.x_name, y + self.px(28), anchor="w",
+                                     text="", fill=t["sub"], font=self.f_cn),
+                "amt": c.create_text(self.x_amt, y + self.px(28), anchor="w",
+                                     text="", fill=t["sub"], font=self.f_cn),
+                "cur": c.create_text(self.x_cur, y + self.px(28), anchor="w",
+                                     text="", fill=t["sub"], font=self.f_cn),
+                "lead": c.create_text(self.x_pct, y + self.px(28), anchor="e",
+                                      text="", fill=t["sub"], font=self.f_cn),
+                "sep": c.create_line(self.px(14), y + self.ROW - 1,
+                                     W - self.px(14), y + self.ROW - 1,
+                                     fill=t["line"]),
+            }
+            self.rows.append(r)
+        # 滚动条：8px 圆头，覆盖可视区高度
+        self.sb_track = c.create_line(
+            W - self.px(6), self.HEAD + self.px(6),
+            W - self.px(6), self.HEAD + self.VIS * self.ROW - self.px(6),
+            fill=t["line"], width=self.px(8), capstyle="round")
+        self.sb_thumb = c.create_line(0, 0, 0, 0, fill=t["bar"],
+                                      width=self.px(8), capstyle="round")
+        # 空态两行
+        cy = self.HEAD + (H - self.HEAD) * 0.52
+        self.empty1 = c.create_text(W / 2, cy - self.px(8), text="",
+                                    fill=t["sub"], font=self.f_nm)
+        self.empty2 = c.create_text(W / 2, cy + self.px(12), text="",
+                                    fill=t["sub"], font=self.f_s)
+
+    @staticmethod
+    def _fit(font_, text, max_w):
+        """右截断（保头部）：板块名/领涨股的常规截断。"""
+        if font_.measure(text) <= max_w:
+            return text
+        s = text
+        while s and font_.measure(s + "…") > max_w:
+            s = s[:-1]
+        return (s + "…") if s else "…"
+
+    @staticmethod
+    def _fit_left(font_, text, max_w):
+        """左截断（保尾部）：领涨股名太长时保住后面的涨幅数字。"""
+        if font_.measure(text) <= max_w:
+            return text
+        s = text
+        while s and font_.measure("…" + s) > max_w:
+            s = s[1:]
+        return ("…" + s) if s else "…"
+
+    def render(self):
+        """重画列表（内容/状态变化才调；tick 每秒不重排）。"""
+        if not self._alive():
+            return
+        evs = self.app.bw_engine.events
+        n = len(evs)
+        # 滚动钳制（M-02）：200 条上限后尾部持续裁剪，只加不减会滚出视口
+        self.scroll = max(0, min(self.scroll, max(0, n - self.VIS)))
+        t, c = self.theme, self.cv
+        for i, r in enumerate(self.rows):
+            idx = self.scroll + i
+            ev = evs[idx] if idx < n else None
+            if ev is None:
+                for k in ("t", "arw", "name", "tag_box", "tag_txt", "pct",
+                          "lvl", "amt", "cur", "lead", "sep"):
+                    c.itemconfigure(r[k], state="hidden")
+                continue
+            y = r["_y"]
+            up = (ev.get("dir") or "up") == "up"
+            col = t["up"] if up else t["down"]
+            pct = float(ev.get("pct") or 0.0)
+            tag = bool(ev.get("upgrade"))
+            nm_max = ((self.x_tag - self.px(6)) if tag
+                      else (self.x_pct - self.pct_w - self.px(10))) - self.x_name
+            c.itemconfigure(r["t"], text=str(ev.get("t") or "--:--"),
+                            fill=t["sub"], state="normal")
+            c.itemconfigure(r["arw"], text="↑" if up else "↓", fill=col,
+                            state="normal")
+            c.itemconfigure(r["name"], fill=t["name"], state="normal",
+                            text=self._fit(self.f_nm, str(ev.get("name") or ""),
+                                           max(self.px(24), nm_max)))
+            c.itemconfigure(r["pct"], fill=col, state="normal",
+                            text=f"{pct:+.2f}%")
+            if tag:
+                tw = self.f_s.measure("升级") + self.px(6)
+                x1 = self.x_pct - self.pct_w - self.px(6)
+                c.coords(r["tag_box"], x1 - tw, y + self.px(5),
+                         x1, y + self.px(19))
+                c.itemconfigure(r["tag_box"], state="normal")
+                c.coords(r["tag_txt"], x1 - tw / 2, y + self.px(12))
+                c.itemconfigure(r["tag_txt"], fill=t["sub"], state="normal")
+            else:
+                c.itemconfigure(r["tag_box"], state="hidden")
+                c.itemconfigure(r["tag_txt"], state="hidden")
+            # 副行：档位 / 放量 / 当前（或未校验）/ 领涨股
+            lvl = int(ev.get("lvl") or 0)
+            c.itemconfigure(r["lvl"], state="normal", fill=t["sub"],
+                            text=BW_LVL_CN[max(0, min(2, lvl))])
+            mult = ev.get("mult")
+            if ev.get("unverified") or mult is None:
+                amt_txt, cur_txt = "放量 —", "未校验"
+            else:
+                amt_txt = f"放量 {float(mult):.1f}x"
+                cur_txt = f"当前 {float(ev.get('cur') or 0.0):+.1f}%"
+            c.itemconfigure(r["amt"], text=amt_txt, fill=t["sub"], state="normal")
+            # 当前/未校验按内容自适应；领涨股右对齐，可用宽度让位给它（右端
+            # 恒定，截断只发生在左侧，保得住后面的涨幅数字）
+            c.itemconfigure(r["cur"], text=cur_txt, fill=t["sub"], state="normal")
+            lw = (self.x_pct - self.x_cur - self.f_cn.measure(cur_txt)
+                  - self.px(8))
+            lead = str(ev.get("lead") or "")
+            lp = ev.get("lead_pct")
+            lead_txt = f"{lead} {float(lp):+.1f}%" if lead else ""
+            c.itemconfigure(r["lead"], state="normal", fill=t["sub"],
+                            text=self._fit_left(self.f_cn, lead_txt,
+                                                max(self.px(30), lw)))
+            c.itemconfigure(r["sep"],
+                            state=("normal" if idx + 1 < n else "hidden"))
+        self._scrollbar(n)
+        self._empty(n)
+        self._header(n)
+
+    def _header(self, n):
+        """标题栏：三段状态（R-13，中断优先于休市）+ 今日条数。"""
+        t, c = self.theme, self.cv
+        phase = self.app.bw_phase()
+        if phase == "stale":
+            dot, mark, mcol = t["up"], "数据中断", t["up"]
+        elif phase == "closed":
+            dot, mark, mcol = t["flat"], "休市", t["sub"]
+        else:
+            dot, mark, mcol = t["down"], "", t["sub"]
+        c.itemconfigure(self.dot, fill=dot)
+        cnt = f"今日 {n} 条"
+        c.itemconfigure(self.cnt, text=cnt, fill=t["sub"])
+        c.itemconfigure(self.mark, text=mark, fill=mcol)
+        # 标记右对齐到条数左侧：条数宽度随数字变化，故每次重算 x
+        c.coords(self.mark, self.W - self.px(14) - self.f_num.measure(cnt)
+                 - self.px(9), self.HEAD / 2)
+
+    def _scrollbar(self, n):
+        """滑块高度按 可视/总数 比例，最小 20px；不足一屏时整条隐藏。"""
+        c, t = self.cv, self.theme
+        if n <= self.VIS:
+            c.itemconfigure(self.sb_track, state="hidden")
+            c.itemconfigure(self.sb_thumb, state="hidden")
+            return
+        c.itemconfigure(self.sb_track, state="normal", fill=t["line"])
+        top = self.HEAD + self.px(6)
+        bot = self.HEAD + self.VIS * self.ROW - self.px(6)
+        span = bot - top
+        h = max(self.px(20), span * self.VIS / float(n))
+        off = (span - h) * (self.scroll / float(max(1, n - self.VIS)))
+        x = self.W - self.px(6)
+        c.coords(self.sb_thumb, x, top + off, x, top + off + h)
+        c.itemconfigure(self.sb_thumb, state="normal", fill=t["bar"])
+
+    def _empty(self, n):
+        """空态引导（三态文案）：有事件时整体隐藏。"""
+        c = self.cv
+        if n:
+            c.itemconfigure(self.empty1, text="")
+            c.itemconfigure(self.empty2, text="")
+            return
+        phase = self.app.bw_phase()
+        if phase == "stale":
+            a, b = "数据暂时中断", "连续 3 轮失败，恢复后自动续采"
+        elif phase == "closed":
+            a, b = "今日暂无板块异动", "交易日 9:30–11:30、13:00–15:00 采集"
+        else:
+            a, b = "开盘中，暂无板块异动", "达到阈值的事件会自动出现在这里"
+        c.itemconfigure(self.empty1, text=a, fill=self.theme["sub"])
+        c.itemconfigure(self.empty2, text=b, fill=self.theme["sub"])
+
+    def _recolor(self):
+        """主题切换：整块重建（R-11 允许全量重绘，含 body）。"""
+        self.theme = self.app.theme
+        self.cv.delete("all")
+        self.cv.configure(bg=KEY)
+        self.tip_on = False
+        self._layout()
+        self.render()
+
+    # ---------- 刷新入口（Panel 单向驱动） ----------
+    def refresh(self, added):
+        """新增事件后调：视口在顶部就跟新，在看历史就整体下移（M-02）。"""
+        if not self._alive():
+            return
+        if added and self.scroll > 0:
+            self.scroll += added
+        self.render()
+
+    def reset_view(self):
+        """跨日/清空后回顶部并整块重排。"""
+        self.scroll = 0
+        self._phase = None
+        self.render()
+
+    def tick(self):
+        """1 秒：比对置顶与主题，状态边沿变化才重排（不读网络、不重算判定）。"""
+        if not self._alive():
+            return
+        try:
+            top = bool(self.app.cfg.get("topmost", True))
+            # 菜单开着时不去抢置顶：否则菜单（同为 topmost）会被本窗压住
+            if not self._menu_open:
+                try:
+                    if bool(self.win.attributes("-topmost")) != top:
+                        self.win.attributes("-topmost", top)
+                except Exception:
+                    pass
+            if self.app.theme is not self.theme:
+                self._recolor()
+            key = (self.app.bw_phase(), len(self.app.bw_engine.events))
+            if key != self._phase:
+                self._phase = key
+                self.render()
+        except Exception:
+            pass
+        try:
+            self.win.after(1000, self.tick)
+        except Exception:
+            pass
+
+    def sync_top(self):
+        try:
+            self.win.attributes("-topmost", bool(self.app.cfg.get("topmost", True)))
+        except Exception:
+            pass
+
+    def _alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except Exception:
+            return False
+
+    # ---------- 截图让位（R-12，逻辑同 SView） ----------
+    def _yield_tick(self):
+        if not self._alive():
+            return
+        try:
+            hide = (not self._dragging) and foreign_fullscreen()
+            if hide and not self._yielded:
+                self._yielded = True
+                self._tip_hide()
+                self.win.withdraw()
+            elif not hide and self._yielded:
+                self._yielded = False
+                self.win.deiconify()
+                x, y = self.win.winfo_x(), self.win.winfo_y()
+                self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+                self.sync_top()
+                self.win.lift()
+        except Exception:
+            pass
+        try:
+            self.win.after(SV_YIELD_MS, self._yield_tick)
+        except Exception:
+            pass
+
+    # ---------- 指标说明浮层（R-20 / D7：画在 Canvas 内） ----------
+    def motion(self, e):
+        if self._dragging:
+            return
+        x1, x2, y1, y2 = self.hot["qi"]
+        inside = x1 <= e.x <= x2 and y1 <= e.y <= y2
+        if inside and not self.tip_on:
+            self._tip_show()
+        elif not inside and self.tip_on:
+            self._tip_hide()
+
+    def leave(self, e):
+        self._tip_hide()
+
+    def _tip_show(self):
+        """指标说明：标题 + 4 行口径 + 1 行注；覆盖列表、不挤压行高。"""
+        if self.tip_on or not self._alive():
+            return
+        self.tip_on = True
+        t, c = self.theme, self.cv
+        pad, lh = self.px(12), self.px(15)
+        x0, y0 = self.px(14), self.px(40)
+        x1 = self.W - self.px(14)
+        h = pad * 2 + self.px(22) + lh * len(BW_TIP_ROWS) + self.px(9) + self.px(14)
+        y1 = y0 + h
+        c.delete("tip")
+        # 先用列表底色铺满整个外框：圆角缺口处会露出下层行文字（红涨绿跌的
+        # 涨幅正好压在右边缘），铺一层后再画圆角，缺口就只剩干净底色
+        c.create_rectangle(x0, y0, x1, y1, fill=t["bg"], outline="", tags="tip")
+        self._round(x0, y0, x1, y1, self.px(10), t["line"], "tip")
+        self._round(x0 + 1, y0 + 1, x1 - 1, y1 - 1, self.px(9), t["head"], "tip")
+        c.create_text(x0 + pad, y0 + pad + self.px(6), anchor="w", text="指标说明",
+                      fill=t["text"], font=self.f_ttl, tags="tip")
+        y = y0 + pad + self.px(22)
+        for k, v in BW_TIP_ROWS:
+            c.create_text(x0 + pad, y, anchor="w", text=k, fill=t["sub"],
+                          font=self.f_cn, tags="tip")
+            c.create_text(x0 + pad + self.px(30), y, anchor="w", text=v,
+                          fill=t["name"], font=self.f_cn, tags="tip")
+            y += lh
+        y += self.px(4)
+        c.create_line(x0 + pad, y, x1 - pad, y, fill=t["line"], tags="tip")
+        c.create_text(x0 + pad, y + self.px(10), anchor="w", text=BW_TIP_FOOT,
+                      fill=t["sub"], font=self.f_s, tags="tip")
+        c.tag_raise("tip")
+
+    def _tip_hide(self):
+        if self.tip_on:
+            self.tip_on = False
+            try:
+                self.cv.delete("tip")
+            except Exception:
+                pass
+
+    # ---------- 滚动 / 拖动 / 右键 ----------
+    def on_wheel(self, e):
+        """滚轮上滚看更早的事件（scroll 加大即向历史翻）。"""
+        n = len(self.app.bw_engine.events)
+        step = 3 if e.delta > 0 else -3
+        self.scroll = max(0, min(self.scroll + step, max(0, n - self.VIS)))
+        self._tip_hide()
+        self.render()
+
+    def press(self, e):
+        self._tip_hide()
+        self._dragging = True
+        self._dx, self._dy = e.x, e.y
+
+    def drag(self, e):
+        x = self.win.winfo_x() + e.x - self._dx
+        y = self.win.winfo_y() + e.y - self._dy
+        self.win.geometry(f"+{x}+{y}")
+
+    def drop(self, e):
+        self._dragging = False
+        x = max(0, min(self.win.winfo_x(),
+                       self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(self.win.winfo_y(),
+                       self.win.winfo_screenheight() - self.H))
+        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self.app.cfg["block_x"], self.app.cfg["block_y"] = x, y
+        save_json(CONFIG_FILE, self.app.cfg)
+
+    def menu(self, e):
+        """右键三项（R-10/R-14）：自绘菜单，与悬浮窗同套圆角/主题/置顶。
+
+        BUG-14 的根因是无边框窗上的 Tk 原生菜单 post 后立刻被 unpost，
+        因此这里与 SView 一样改用 PopupMenu。
+        """
+        self._tip_hide()
+        now = time.monotonic()
+        if now - self._menu_ts < 0.15:
+            return                       # 同一次右键被重复投递（BUG-14 兜底）
+        self._menu_ts = now
+        PopupMenu(self.app, [("清空今日记录", self.app.bw_clear),
+                             ("-", None),
+                             ("隐藏", lambda: self.app.toggle_block(False)),
+                             ("重置位置", self.reset_pos)],
+                  self.theme, e.x_root, e.y_root, host=self).show()
+
+    def reset_pos(self):
+        """重置位置：清 block_x/y 落盘，按默认位（主窗右侧）重算，不动显隐。"""
+        cfg = self.app.cfg
+        cfg.pop("block_x", None)
+        cfg.pop("block_y", None)
+        save_json(CONFIG_FILE, cfg)
+        x = self.app.root.winfo_x() + self.app.root.winfo_width() + self.px(8)
+        if x + self.W > self.win.winfo_screenwidth():
+            x = self.app.root.winfo_x() - self.W - self.px(8)
+        if x < 0:
+            x = self.win.winfo_screenwidth() - self.W - self.px(8)
+        y = self.app.root.winfo_y()
         x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
         y = max(0, min(y, self.win.winfo_screenheight() - self.H))
         self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
@@ -7439,6 +9214,7 @@ class KlineWin:
         menu.add_command(label="删除当前周期全部", command=self._confirm_delete_all)
         menu.add_command(label="取消选中", command=self._deselect)
         try:
+            menu_topmost(menu)          # K 线窗同样置顶，菜单要先提层级（BUG-14）
             menu.tk_popup(e.x_root, e.y_root)
         finally:
             menu.grab_release()
@@ -8425,6 +10201,157 @@ def selftest():
               and SView._tip_segs("", "#222") == [])
     print(f"[sv2   ] 涨跌家数(沪/深分组,bj忽略) 量能差额四态 浮层分色 "
           f"{'OK' if ud_ok and not ad_bad and seg_ok else '!! ' + str((ud, ad_bad, seg_ok))}")
+
+    # v1.1.3：量能走势图的取点与刻度（R-15）
+    tp_series = [float(i) * 1e8 for i in range(241)]
+    tp1 = amt_trend_points(tp_series, 140)          # 0,5,…,140 共 29 点
+    tp_ok = (len(tp1) == 29 and tp1[0] == (0, 0.0) and tp1[-1][0] == 140
+             and all((a2 - a1) == SV_TREND_STEP
+                     for (a1, _), (a2, _) in zip(tp1, tp1[1:])))
+    tp2 = amt_trend_points(tp_series, 0)
+    tp3 = amt_trend_points([], 140)
+    tp4 = amt_trend_points(tp_series, 137)          # 末轴非整数倍 → 补一点
+    tp_more = (tp2 == [(0, 0.0)] and tp3 == []
+               and tp4[-1] == (137, tp_series[137])
+               and tp4[-2][0] == 135)
+    # 刻度：9540 亿 → 9500 亿（100 亿档向下取整），双 None → 0
+    sc_ok = (amt_trend_scale(8000e8, 9000e8) == 9500e8
+             and amt_trend_scale(None, 9000e8) == 9500e8
+             and amt_trend_scale(None, None) == 0.0
+             and abs(amt_trend_scale(50e8, None) - 53e8) < 1)  # 不足一档不取整
+    print(f"[sv3   ] 走势取点(29点/末点补齐/空序列) 刻度取整 "
+          f"{'OK' if tp_ok and tp_more and sc_ok else '!! ' + str((tp1[-1], tp4, sc_ok))}")
+    # v1.2.0：指针定位（R-16）时间轴换算——午休折轴处 120 归前半场
+    at_ok = (amt_ax_time(0) == "09:30" and amt_ax_time(60) == "10:30"
+             and amt_ax_time(120) == "11:30" and amt_ax_time(121) == "13:01"
+             and amt_ax_time(240) == "15:00"
+             and amt_ax_time(-5) == "09:30" and amt_ax_time(999) == "15:00")
+    print(f"[sv3   ] 指针定位时间轴(09:30/10:30/11:30/13:01/15:00+越界钳制) "
+          f"{'OK' if at_ok else '!! ' + str([amt_ax_time(v) for v in (0, 60, 120, 121, 240)])}")
+    # v1.2.2：浮层三列版式（列不重叠、不越右内边距、余量不足退到最小间距）
+    cw = [185, 171, 118]                              # 实测列宽（150% 缩放下）
+    xs = tip_cols_at(cw, 612, 14, 15, 45)
+    cw2 = [300, 300]                                  # 超宽：退到最小间距
+    xs2 = tip_cols_at(cw2, 500, 14, 15, 45)
+    col_ok = (xs == [14, 244, 460] and xs[-1] + cw[-1] <= 612 - 14
+              and xs2[1] - xs2[0] == 315
+              and tip_cols_at([100], 300, 14, 15, 45) == [14])
+    print(f"[sv4   ] 浮层三列起点(余量均分/右不越界/超宽退最小间距) "
+          f"{'OK' if col_ok else '!! ' + str((xs, xs2))}")
+
+    # ---- 板块异动：纯函数与引擎自检（无网络，T012）----
+    def _bwrow(code, name, members, pct, amt, lead, lp, tail=""):
+        return (f'"{code}":"{code},{name},{members},1,0,{pct},100,{amt},0,'
+                f'{lp},1,0,{lead}{tail}"')
+
+    # 45 条正常 + 1 条 14 段（领涨股名带英文逗号）+ 1 条 12 段（残缺）
+    bw_txt = ("var S_Finance_bankuai_sinaindustry = {"
+              + ",".join(_bwrow(f"new_{i}", f"行业{i}", 20, "1.20", "1.0e8",
+                                "龙头", "5.0") for i in range(45))
+              + "," + _bwrow("new_x", "带逗号板块", 30, "2.50", "2.0e8",
+                             "ST中", "6.0", ",A")
+              + ',"new_y":"new_y,残缺板块,20,1,0,2.5,100"}')
+    bw_hy = bw_parse(bw_txt + ";", "hy")
+    bw_p_ok = (bw_hy is not None and len(bw_hy) == 46
+               and bw_hy["new_x"]["lead"] == "ST中,A"
+               and abs(bw_hy["new_x"]["pct"] - 2.5) < 1e-9
+               and bw_hy["new_x"]["members"] == 30
+               and "new_y" not in bw_hy                 # 段数不足丢弃
+               and bw_parse("var x = {};", "hy") is None)  # 条数不足 → None
+    lv_cases = ((0.79, 0), (0.8, 0), (1.49, 0), (1.5, 1), (2.49, 1),
+                (2.5, 2), (-2.6, 2))
+    lv_bad = [(v, bw_lvl(v), w) for v, w in lv_cases if bw_lvl(v) != w]
+    ss_cases = ((datetime(2026, 11, 16, 9, 29), False),
+                (datetime(2026, 11, 16, 9, 30), True),
+                (datetime(2026, 11, 16, 11, 30), True),
+                (datetime(2026, 11, 16, 11, 31), False),
+                (datetime(2026, 11, 16, 12, 59), False),
+                (datetime(2026, 11, 16, 13, 0), True),
+                (datetime(2026, 11, 16, 15, 0), True),
+                (datetime(2026, 11, 16, 15, 1), False),
+                (datetime(2026, 11, 21, 10, 0), False))     # 周六
+    ss_bad = [(t.strftime("%m-%d %H:%M"), is_session(t), w)
+              for t, w in ss_cases if is_session(t) != w]
+    print(f"[bw    ] 解析(46条/逗号合并/残缺丢弃/下限) 档位边界7例 时段9例 "
+          f"{'OK' if bw_p_ok and not lv_bad and not ss_bad else '!! ' + str((len(bw_hy or ()), lv_bad, ss_bad))}")
+
+    # 取窗：13 点/30 秒 → 3 分钟正好落在 180 秒那一点；4 点（仅 90 秒）无解
+    bw_base = 1.0e6
+    bw_ser = deque((bw_base - 30 * (12 - i), float(i), 1e8 * i) for i in range(13))
+    bw_w = bw_window(bw_ser, bw_base)
+    bw_w2 = bw_window(deque((bw_base - 30 * (3 - i), float(i), 0.0)
+                            for i in range(4)), bw_base)
+    win_ok = (bw_w is not None and abs(bw_w[2] - 180.0) < 1e-6
+              and abs(bw_w[0] - 6.0) < 1e-9 and abs(bw_w[1] - 6e8) < 1e-6
+              and bw_window(deque(), bw_base) is None and bw_w2 is None)
+    # 判定四态：涨速不够 / 放量倍数不够 / 双条件满足 / 前窗不可用
+    v1 = bw_verdict(0.5, 0.5, 1e8, 5e7)
+    v2 = bw_verdict(1.0, 1.0, 1e8, 9e7)
+    v3 = bw_verdict(1.0, 1.0, 1e8, 5e7)
+    v4 = bw_verdict(1.0, 1.0, 1e8, None)
+    v5 = bw_verdict(1.0, 1.0, 4e7, 1e7)          # 倍数够但不足 5000 万
+    vd_ok = (v1 == (False, 0, None, False) and v2[0] is False
+             and v3[0] is True and v3[1] == 0 and abs(v3[2] - 2.0) < 1e-9
+             and v3[3] is False
+             and v4[0] is True and v4[2] is None and v4[3] is True
+             and v5[0] is False)
+
+    # 引擎：首窗豁免 → 同向淘汰 → 升档 → 方向反转
+    eng = BlockEngine()
+
+    def _bsnap(pct, amt, members=20):
+        return {"new_t": {"name": "测试板块", "members": members, "pct": pct,
+                          "amt": amt, "lead": "龙头", "lead_pct": 1.0}}
+
+    t0 = 1.7e9
+    flat = ((0.0, 1.00e8), (0.0, 1.02e8), (0.0, 1.04e8),
+            (0.0, 1.06e8), (0.0, 1.08e8), (0.0, 1.10e8))
+    for k, (p, a) in enumerate(flat):
+        eng.feed(_bsnap(p, a), t0 + 30 * k)
+    e1 = eng.feed(_bsnap(1.2, 1.71e8), t0 + 180)
+    e2 = eng.feed(_bsnap(1.3, 1.72e8), t0 + 210)     # 同向未升档 → 丢弃
+    e3 = eng.feed(_bsnap(1.7, 1.73e8), t0 + 240)     # 弱 → 中，升档
+    e4 = eng.feed(_bsnap(-1.0, 1.74e8), t0 + 270)    # 反向立记
+    m3 = eng.feed({"new_m": {"name": "小板块", "members": 3, "pct": 5.0,
+                             "amt": 9e8, "lead": "", "lead_pct": 0.0}}, t0 + 300)
+    eng_ok = (len(e1) == 1 and e1[0]["unverified"] is True and e1[0]["lvl"] == 0
+              and abs(e1[0]["pct"] - 1.2) < 1e-9
+              and e2 == [] and len(e3) == 1 and e3[0]["upgrade"] is True
+              and len(e4) == 1 and e4[0]["dir"] == "down"
+              and m3 == [] and "new_m" not in eng.series)   # 成分股 < 5 不判定
+    # 容量：210 条裁剪到 200，保留最新（尾部是旧事件）
+    eng2 = BlockEngine()
+    eng2.events = [{"ts": float(i)} for i in range(210)]
+    eng2._trim()
+    cap_ok = len(eng2.events) == 200 and eng2.events[-1]["ts"] == 199.0
+    print(f"[bw2   ] 取窗(13点/4点) 判定四态 引擎(豁免/淘汰/升档/反转) 容量 "
+          f"{'OK' if win_ok and vd_ok and eng_ok and cap_ok else '!! ' + str((bw_w, bw_w2, (v3, v4), (len(e1), len(e2), len(e3), len(e4)), cap_ok))}")
+
+    # 存档往返：同日期恢复条数与去重基准；异日期清空并覆盖
+    global BW_EVENTS_FILE
+    _bw_bak = BW_EVENTS_FILE
+    BW_EVENTS_FILE = os.path.join(BASE, "block_events.selftest.json")
+    try:
+        eng3 = BlockEngine()
+        eng3.date = "2026-11-16"
+        eng3.events = [{"ts": t0, "code": "new_a", "lvl": 2, "dir": "up",
+                        "pct": 1.2, "t": "10:00", "name": "A"}]
+        eng3.save()
+        eng4, eng5 = BlockEngine(), BlockEngine()
+        n_same = eng4.load("2026-11-16")
+        n_other = eng5.load("2026-11-17")
+        rt_ok = (n_same == 1 and eng4.last.get("new_a", (0, "", -1))[2] == 2
+                 and n_other == 0 and not eng5.events)
+    except Exception as ex:
+        rt_ok = False
+        print(f"[bw3   ] 存档往返 !! {ex!r}")
+    finally:
+        BW_EVENTS_FILE = _bw_bak
+        try:
+            os.remove(os.path.join(BASE, "block_events.selftest.json"))
+        except Exception:
+            pass
+    print(f"[bw3   ] 存档往返(同日期恢复/异日期清空) {'OK' if rt_ok else '!! 不符'}")
 
     # 截图让位探测（BUG-10）：只验可用性与不抛异常，前台态随运行环境变化故不断言值
     try:

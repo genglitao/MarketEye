@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PROTO-盯盘君-板块异动-v1.0.0</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+文档信息
+  项目名称：盯盘君 MarketEye
+  文档版本：v1.0.0
+  版本状态：未发布
+  创建日期：2026-11-16
+  更新日期：2026-11-16
+  基于需求：PRD-盯盘君-板块异动-v1.0.0
+说明
+  本文件为界面视觉评审稿，仅用于确认小窗尺寸、行内信息密度、状态标记与主题配色，不参与产品构建。
+  窗口尺寸为真实逻辑像素 340 × 420，最终实现以 ticker.pyw 的 Canvas 绘制为准；像素级对齐以实际程序截图为准。
+  页面内板块与涨跌为示意数据，非实时行情。
+  需实机验证项：颜色键透明圆角、窗口置顶与截图让位、滚轮滚动与滚动条拖动、标题栏拖动与位置记忆。
+-->
+<style>
+  :root{
+    --cn:"Microsoft YaHei UI","Microsoft YaHei","SimHei",sans-serif;
+    --num:Consolas,"Cascadia Mono","Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:30px 26px 64px;background:#0B0E14;
+    background-image:radial-gradient(circle at 16% 8%,#182030 0%,#0B0E14 60%);
+    color:#C8D2E4;font-family:var(--cn);
+  }
+  .page-head{max-width:1180px;margin:0 auto 20px}
+  .page-head h1{font-size:18px;font-weight:700;color:#EAEFF8;margin:0 0 8px}
+  .page-head p{margin:0 0 4px;font-size:12.5px;color:#8C9AB0;line-height:1.75}
+  .page-head .warn{color:#C9A34E}
+  .toolbar{max-width:1180px;margin:0 auto 24px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .btn{
+    font-family:var(--cn);font-size:12px;color:#EAEFF8;background:#232B3A;
+    border:1px solid #2E3A50;border-radius:8px;padding:7px 13px;cursor:pointer;
+  }
+  .btn:hover{background:#2B3446}
+  .btn.on{background:#2F6FED;border-color:#2F6FED}
+  .hint{font-size:11.5px;color:#6F7D93}
+
+  .gallery{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start}
+  .item{display:flex;flex-direction:column;gap:10px}
+  .caption{font-size:12px;color:#8C9AB0;line-height:1.7;max-width:340px}
+  .caption b{color:#D7E0EF;font-weight:600}
+  .caption .k{
+    display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:4px;
+    background:#1D2431;border:1px solid #2A3345;color:#9AA8C0;margin-right:5px;
+  }
+  .caption ul{margin:6px 0 0;padding-left:16px}
+  .caption li{margin:0 0 3px}
+
+  /* ---------- 小窗（真实 340 × 420） ---------- */
+  .win{
+    --bg:#151A24;--head:#1D2431;--line:#2A3345;
+    --text:#EAEFF8;--sub:#7E8BA1;--name:#C3CCDC;
+    --up:#FF4D4F;--down:#12B76A;--flat:#95A1B4;--bar:#9AA8C0;
+    --ok:#12B76A;--fail:#E5484D;--mark:#3B82F6;
+    position:relative;width:340px;height:420px;border-radius:16px;overflow:hidden;
+    background:var(--bg);display:flex;flex-direction:column;
+    box-shadow:0 18px 46px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.05);
+  }
+  .win.light{
+    --bg:#FFFFFF;--head:#F3F6FB;--line:#E4E9F2;
+    --text:#1A2233;--sub:#8592A6;--name:#3C4658;
+    --up:#E5484D;--down:#0E9F5E;--flat:#7A8699;--bar:#9AA8C0;
+  }
+
+  /* 标题栏 34 */
+  .head{
+    height:34px;flex:0 0 34px;background:var(--head);
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 13px 0 14px;
+  }
+  .hl{display:flex;align-items:center;gap:7px;min-width:0}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:0 0 6px}
+  .dot.closed{background:var(--flat)}
+  .dot.stale{background:var(--fail)}
+  .title{font-size:13px;font-weight:700;color:var(--text);white-space:nowrap}
+  .hr{display:flex;align-items:center;gap:9px;flex:0 0 auto}
+  .mark{font-size:11px;color:var(--sub)}
+  .mark.stale{color:var(--fail)}
+  .cnt{font-family:var(--num);font-size:11px;color:var(--sub)}
+
+  /* 指标说明：标题栏问号入口 + 悬停浮层 */
+  .qi{
+    width:13px;height:13px;border-radius:50%;border:1px solid var(--line);
+    color:var(--sub);font-size:9px;line-height:1;
+    display:inline-flex;align-items:center;justify-content:center;
+    flex:0 0 13px;cursor:help;opacity:.75;
+  }
+  .qi:hover{opacity:1;border-color:var(--sub);color:var(--text);background:var(--bg)}
+  .pop{
+    position:absolute;left:14px;top:40px;width:312px;z-index:6;display:none;
+    background:var(--head);border:1px solid var(--line);border-radius:10px;
+    box-shadow:0 14px 34px rgba(0,0,0,.5);padding:9px 12px 10px;
+  }
+  .pop.show,.pop.pin,.head:has(.qi:hover)+.pop{display:block}
+  .pop h6{font-size:11px;font-weight:700;color:var(--text);margin:0 0 7px}
+  .pop dl{margin:0;display:grid;grid-template-columns:30px 1fr;column-gap:8px;row-gap:5px;
+    font-size:11px;line-height:14px}
+  .pop dt{color:var(--sub)}
+  .pop dd{margin:0;color:var(--name)}
+  .pop .n{font-family:var(--num);color:var(--text)}
+  .pop .lv{color:var(--text);font-weight:700}
+  .pop .ft{margin:8px 0 0;padding-top:7px;border-top:1px solid var(--line);
+    font-size:10px;line-height:14px;color:var(--sub)}
+
+  /* 列表区 */
+  .body{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+  .list{position:absolute;left:0;top:0;right:10px;bottom:16px;overflow:hidden}
+  .list.full{overflow-y:auto;scrollbar-width:none}
+  .list.full::-webkit-scrollbar{display:none}
+
+  /* 单条事件：两行共享同一套网格列，副行自动与板块名左对齐
+     行高 = 16 + 1 + 13 + 上下留白 9 = 39 */
+  .ev{
+    display:grid;
+    grid-template-columns:44px 12px minmax(0,1fr) auto auto;
+    grid-template-rows:16px 13px;
+    column-gap:7px;row-gap:1px;
+    padding:4px 14px 5px;border-bottom:1px solid var(--line);
+  }
+  .ev:last-child{border-bottom:none}
+  .l1{display:contents}
+  .t{grid-area:1/1;font-family:var(--num);font-size:11px;color:var(--sub);font-variant-numeric:tabular-nums}
+  .arw{grid-area:1/2;font-size:11px;line-height:1}
+  .arw.up{color:var(--up)}
+  .arw.down{color:var(--down)}
+  .bd{
+    grid-area:1/3;min-width:0;font-size:13px;color:var(--name);line-height:16px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .tag{
+    grid-area:1/4;justify-self:end;align-self:center;
+    font-size:10px;color:var(--sub);border:1px solid var(--line);
+    border-radius:3px;padding:0 3px;line-height:13px;
+  }
+  .pc{
+    grid-area:1/5;justify-self:end;font-family:var(--num);
+    font-size:13px;font-weight:700;line-height:16px;font-variant-numeric:tabular-nums;
+  }
+  .pc.up{color:var(--up)}
+  .pc.down{color:var(--down)}
+  .l2{
+    grid-area:2/3/3/6;display:flex;gap:9px;
+    font-size:11px;color:var(--sub);line-height:13px;
+  }
+  .l2 .lead{
+    flex:1 1 auto;min-width:0;text-align:right;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .l2 .lvl{flex:0 0 auto}
+  .l2 .lvl.s{color:var(--up)}
+
+  /* 滚动条：10px 条带，8px 轨道 + 胶囊滑块 */
+  .sb{position:absolute;right:1px;top:0;bottom:16px;width:8px;border-radius:4px;background:var(--line)}
+  .sb i{position:absolute;left:0;width:8px;border-radius:4px;background:var(--bar);opacity:.85}
+
+  /* 空态 */
+  .empty{
+    position:absolute;left:14px;right:14px;top:52%;transform:translateY(-50%);
+    text-align:center;font-size:12px;color:var(--sub);line-height:1.8;
+  }
+  .empty .s{display:block;font-size:11px;color:var(--sub);opacity:.75;margin-top:4px}
+
+  /* 右键菜单浮层 */
+  .menu{
+    position:absolute;left:96px;top:150px;width:152px;padding:4px 0;
+    background:var(--head);border:1px solid var(--line);border-radius:8px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5);display:none;
+  }
+  .menu.show{display:block}
+  .menu u{display:block;padding:7px 14px 7px 22px;font-size:12px;color:var(--text);text-decoration:none}
+  .menu u.sel{background:var(--mark);color:#FFFFFF}
+  .menu hr{border:none;border-top:1px solid var(--line);margin:4px 0}
+
+  /* 尺寸标注 */
+  .dim{position:absolute;left:0;right:0;border-top:1px dashed rgba(59,130,246,.55);pointer-events:none;display:none}
+  .dim.show{display:block}
+  .dim em{
+    position:absolute;right:4px;top:-9px;font-family:var(--num);font-size:10px;
+    font-style:normal;color:#3B82F6;background:var(--bg);padding:0 3px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>盯盘君 · 板块异动 v1.0.0 · 视觉评审稿</h1>
+  <p>窗口真实尺寸 <b>340 × 420</b> 逻辑像素；标题栏 34，单条事件 39（主行 16 + 副行 13 + 留白），可视 9 条，超出滚轮滚动。</p>
+  <p>配色全部取自 <code>THEMES</code>（深色 / 浅色两套键名一致）；红涨绿跌，不反置。</p>
+  <p class="warn">示意数据，非实时行情。颜色键透明圆角、置顶、截图让位、滚轮与拖动需实机验证。</p>
+</div>
+
+<div class="toolbar">
+  <button class="btn" id="b-menu">显示小窗右键菜单</button>
+  <button class="btn" id="b-dim">显示尺寸标注</button>
+  <button class="btn on" id="b-tip">隐藏指标说明</button>
+  <span class="hint">左侧为默认深色主题，最右为浅色主题对照</span>
+</div>
+
+<div class="gallery">
+
+  <!-- 1. 采集中 · 有异动 -->
+  <div class="item">
+    <div class="win" id="w-main">
+      <div class="head">
+        <div class="hl"><span class="dot"></span><span class="title">板块异动</span><span class="qi">?</span></div>
+        <div class="hr"><span class="cnt">今日 12 条</span></div>
+      </div>
+        <div class="pop pin">
+          <h6>指标说明</h6>
+          <dl>
+            <dt>涨速</dt><dd>3 分钟涨幅绝对值 <span class="n">≥ 0.8%</span></dd>
+            <dt>放量</dt><dd>成交额 <span class="n">≥ 前 3 分钟 1.3 倍</span> 且 <span class="n">≥ 5000 万</span></dd>
+            <dt>档位</dt><dd><span class="n">0.8 / 1.5 / 2.5%</span> → <span class="lv">弱 / 中 / 强</span></dd>
+            <dt>去重</dt><dd>同向 10 分钟一条，升档记「升级」</dd>
+          </dl>
+          <p class="ft">时序不足 6 分钟时放量豁免，该条标「未校验」。</p>
+        </div>
+      <div class="body">
+        <div class="list full">
+          <div class="ev">
+            <div class="l1"><span class="t">10:32</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="pc up">+1.8%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 1.9x</span><span>当前 +2.4%</span><span class="lead">中芯国际 +5.2%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:28</span><span class="arw up">↑</span><span class="bd">光伏设备</span><span class="pc up">+0.9%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.4x</span><span>当前 +0.6%</span><span class="lead">隆基绿能 +3.1%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:21</span><span class="arw down">↓</span><span class="bd">白酒概念</span><span class="pc down">−1.2%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 2.1x</span><span>当前 −1.7%</span><span class="lead">酒鬼酒 −4.3%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:14</span><span class="arw up">↑</span><span class="bd">银行</span><span class="pc up">+1.1%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.6x</span><span>当前 +1.3%</span><span class="lead">邮储银行 +2.8%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:09</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="tag">升级</span><span class="pc up">+2.6%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 2.3x</span><span>当前 +2.6%</span><span class="lead">中芯国际 +5.6%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:58</span><span class="arw down">↓</span><span class="bd">房地产</span><span class="pc down">−0.9%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.5x</span><span>当前 −1.1%</span><span class="lead">万科A −3.2%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:52</span><span class="arw up">↑</span><span class="bd">军工装备</span><span class="pc up">+1.5%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.3x</span><span>当前 +2.0%</span><span class="lead">中航沈飞 +4.4%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:47</span><span class="arw up">↑</span><span class="bd">消费电子</span><span class="pc up">+0.8%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 —</span><span>未校验</span><span class="lead">立讯精密 +3.6%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:41</span><span class="arw down">↓</span><span class="bd">CRO</span><span class="pc down">−1.6%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.7x</span><span>当前 −2.1%</span><span class="lead">药明康德 −5.0%</span></div>
+          </div>
+        </div>
+        <div class="sb"><i style="top:0;height:280px"></i></div>
+        <div class="menu" id="m-main">
+          <u>清空今日记录</u>
+          <hr>
+          <u>隐藏</u>
+          <u>重置位置</u>
+        </div>
+        <div class="dim" style="top:34px"><em>标题栏 34</em></div>
+        <div class="dim" style="top:73px"><em>单条 39</em></div>
+      </div>
+    </div>
+    <div class="caption">
+      <span class="k">默认态</span><b>采集中 · 有异动</b>
+      <ul>
+        <li>标题栏左：绿点（采集正常）+ 窗口名；右：今日条数。</li>
+        <li>主行四段：时刻 / 方向箭头 / 板块名 / 3 分钟涨幅。</li>
+        <li>副行四段：档位 / 放量倍数 / 当前涨幅 / 领涨股。</li>
+        <li>标题栏问号：悬停（或点上方按钮）显示指标说明——涨速门槛 / 放量倍数 / 档位边界 / 去重口径，浮层覆盖列表、不挤压行高。</li>
+        <li>第 5 条「升级」：同板块同向升档追加，标签放在板块名后，不占副行。</li>
+        <li>第 8 条「未校验」：开盘初期时序不足 6 分钟，放量豁免的呈现。</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- 2. 空态 -->
+  <div class="item">
+    <div class="win">
+      <div class="head">
+        <div class="hl"><span class="dot"></span><span class="title">板块异动</span><span class="qi">?</span></div>
+        <div class="hr"><span class="cnt">今日 0 条</span></div>
+      </div>
+        <div class="pop">
+          <h6>指标说明</h6>
+          <dl>
+            <dt>涨速</dt><dd>3 分钟涨幅绝对值 <span class="n">≥ 0.8%</span></dd>
+            <dt>放量</dt><dd>成交额 <span class="n">≥ 前 3 分钟 1.3 倍</span> 且 <span class="n">≥ 5000 万</span></dd>
+            <dt>档位</dt><dd><span class="n">0.8 / 1.5 / 2.5%</span> → <span class="lv">弱 / 中 / 强</span></dd>
+            <dt>去重</dt><dd>同向 10 分钟一条，升档记「升级」</dd>
+          </dl>
+          <p class="ft">时序不足 6 分钟时放量豁免，该条标「未校验」。</p>
+        </div>
+      <div class="body">
+        <div class="empty">开盘中，暂无板块异动<span class="s">达到阈值的事件会自动出现在这里</span></div>
+      </div>
+    </div>
+    <div class="caption">
+      <span class="k">空态</span><b>采集中 · 尚无事件</b>
+      <p style="margin:6px 0 0">与主窗空态同一写法：不加插画、不加图标，一行 <code>sub</code> 色文字。</p>
+    </div>
+  </div>
+
+  <!-- 3. 休市 -->
+  <div class="item">
+    <div class="win">
+      <div class="head">
+        <div class="hl"><span class="dot closed"></span><span class="title">板块异动</span><span class="qi">?</span></div>
+        <div class="hr"><span class="mark">休市</span><span class="cnt">今日 12 条</span></div>
+      </div>
+        <div class="pop">
+          <h6>指标说明</h6>
+          <dl>
+            <dt>涨速</dt><dd>3 分钟涨幅绝对值 <span class="n">≥ 0.8%</span></dd>
+            <dt>放量</dt><dd>成交额 <span class="n">≥ 前 3 分钟 1.3 倍</span> 且 <span class="n">≥ 5000 万</span></dd>
+            <dt>档位</dt><dd><span class="n">0.8 / 1.5 / 2.5%</span> → <span class="lv">弱 / 中 / 强</span></dd>
+            <dt>去重</dt><dd>同向 10 分钟一条，升档记「升级」</dd>
+          </dl>
+          <p class="ft">时序不足 6 分钟时放量豁免，该条标「未校验」。</p>
+        </div>
+      <div class="body">
+        <div class="list">
+          <div class="ev">
+            <div class="l1"><span class="t">14:56</span><span class="arw up">↑</span><span class="bd">券商</span><span class="pc up">+1.3%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.5x</span><span>当前 +1.9%</span><span class="lead">东方财富 +3.4%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">14:41</span><span class="arw down">↓</span><span class="bd">煤炭</span><span class="pc down">−1.1%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.4x</span><span>当前 −1.5%</span><span class="lead">兖矿能源 −3.9%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">14:22</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="pc up">+2.1%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.8x</span><span>当前 +3.2%</span><span class="lead">中芯国际 +6.1%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">13:48</span><span class="arw up">↑</span><span class="bd">军工装备</span><span class="pc up">+1.6%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.4x</span><span>当前 +2.2%</span><span class="lead">中航沈飞 +4.8%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">13:31</span><span class="arw down">↓</span><span class="bd">白酒概念</span><span class="pc down">−0.8%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.3x</span><span>当前 −1.4%</span><span class="lead">酒鬼酒 −4.0%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">11:14</span><span class="arw up">↑</span><span class="bd">光伏设备</span><span class="pc up">+1.0%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.5x</span><span>当前 +1.2%</span><span class="lead">隆基绿能 +3.3%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:32</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="pc up">+1.8%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 1.9x</span><span>当前 +2.4%</span><span class="lead">中芯国际 +5.2%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:21</span><span class="arw down">↓</span><span class="bd">白酒概念</span><span class="pc down">−1.2%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 2.1x</span><span>当前 −1.7%</span><span class="lead">酒鬼酒 −4.3%</span></div>
+          </div>
+        </div>
+        <div class="sb"><i style="top:0;height:300px"></i></div>
+      </div>
+    </div>
+    <div class="caption">
+      <span class="k">收盘态</span><b>休市 · 定格复盘</b>
+      <p style="margin:6px 0 0">圆点转灰、右侧加「休市」；列表保留当日全部事件，滚轮可回看，次日开盘自动清空。</p>
+    </div>
+  </div>
+
+  <!-- 4. 数据中断 -->
+  <div class="item">
+    <div class="win">
+      <div class="head">
+        <div class="hl"><span class="dot stale"></span><span class="title">板块异动</span><span class="qi">?</span></div>
+        <div class="hr"><span class="mark stale">数据中断</span><span class="cnt">今日 7 条</span></div>
+      </div>
+        <div class="pop">
+          <h6>指标说明</h6>
+          <dl>
+            <dt>涨速</dt><dd>3 分钟涨幅绝对值 <span class="n">≥ 0.8%</span></dd>
+            <dt>放量</dt><dd>成交额 <span class="n">≥ 前 3 分钟 1.3 倍</span> 且 <span class="n">≥ 5000 万</span></dd>
+            <dt>档位</dt><dd><span class="n">0.8 / 1.5 / 2.5%</span> → <span class="lv">弱 / 中 / 强</span></dd>
+            <dt>去重</dt><dd>同向 10 分钟一条，升档记「升级」</dd>
+          </dl>
+          <p class="ft">时序不足 6 分钟时放量豁免，该条标「未校验」。</p>
+        </div>
+      <div class="body">
+        <div class="list">
+          <div class="ev">
+            <div class="l1"><span class="t">10:14</span><span class="arw up">↑</span><span class="bd">银行</span><span class="pc up">+1.1%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.6x</span><span>当前 +1.3%</span><span class="lead">邮储银行 +2.8%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:09</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="tag">升级</span><span class="pc up">+2.6%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 2.3x</span><span>当前 +2.6%</span><span class="lead">中芯国际 +5.6%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:58</span><span class="arw down">↓</span><span class="bd">房地产</span><span class="pc down">−0.9%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.5x</span><span>当前 −1.1%</span><span class="lead">万科A −3.2%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:52</span><span class="arw up">↑</span><span class="bd">军工装备</span><span class="pc up">+1.5%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.3x</span><span>当前 +2.0%</span><span class="lead">中航沈飞 +4.4%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:41</span><span class="arw down">↓</span><span class="bd">CRO</span><span class="pc down">−1.6%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.7x</span><span>当前 −2.1%</span><span class="lead">药明康德 −5.0%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:33</span><span class="arw up">↑</span><span class="bd">券商</span><span class="pc up">+1.2%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.4x</span><span>当前 +1.5%</span><span class="lead">东方财富 +3.0%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:26</span><span class="arw down">↓</span><span class="bd">煤炭</span><span class="pc down">−1.3%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.5x</span><span>当前 −1.6%</span><span class="lead">兖矿能源 −4.1%</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">
+      <span class="k">异常态</span><b>连续 3 轮拉取失败</b>
+      <p style="margin:6px 0 0">圆点转红、右侧「数据中断」；列表原样保持不再推进，不弹窗、不抢焦点。恢复后标记消失，时序重新起算 6 分钟。</p>
+    </div>
+  </div>
+
+  <!-- 5. 浅色主题 -->
+  <div class="item">
+    <div class="win light">
+      <div class="head">
+        <div class="hl"><span class="dot"></span><span class="title">板块异动</span><span class="qi">?</span></div>
+        <div class="hr"><span class="cnt">今日 12 条</span></div>
+      </div>
+        <div class="pop">
+          <h6>指标说明</h6>
+          <dl>
+            <dt>涨速</dt><dd>3 分钟涨幅绝对值 <span class="n">≥ 0.8%</span></dd>
+            <dt>放量</dt><dd>成交额 <span class="n">≥ 前 3 分钟 1.3 倍</span> 且 <span class="n">≥ 5000 万</span></dd>
+            <dt>档位</dt><dd><span class="n">0.8 / 1.5 / 2.5%</span> → <span class="lv">弱 / 中 / 强</span></dd>
+            <dt>去重</dt><dd>同向 10 分钟一条，升档记「升级」</dd>
+          </dl>
+          <p class="ft">时序不足 6 分钟时放量豁免，该条标「未校验」。</p>
+        </div>
+      <div class="body">
+        <div class="list">
+          <div class="ev">
+            <div class="l1"><span class="t">10:32</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="pc up">+1.8%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 1.9x</span><span>当前 +2.4%</span><span class="lead">中芯国际 +5.2%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:28</span><span class="arw up">↑</span><span class="bd">光伏设备</span><span class="pc up">+0.9%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.4x</span><span>当前 +0.6%</span><span class="lead">隆基绿能 +3.1%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:21</span><span class="arw down">↓</span><span class="bd">白酒概念</span><span class="pc down">−1.2%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 2.1x</span><span>当前 −1.7%</span><span class="lead">酒鬼酒 −4.3%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:14</span><span class="arw up">↑</span><span class="bd">银行</span><span class="pc up">+1.1%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.6x</span><span>当前 +1.3%</span><span class="lead">邮储银行 +2.8%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">10:09</span><span class="arw up">↑</span><span class="bd">半导体</span><span class="tag">升级</span><span class="pc up">+2.6%</span></div>
+            <div class="l2"><span class="lvl">强</span><span>放量 2.3x</span><span>当前 +2.6%</span><span class="lead">中芯国际 +5.6%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:52</span><span class="arw up">↑</span><span class="bd">军工装备</span><span class="pc up">+1.5%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.3x</span><span>当前 +2.0%</span><span class="lead">中航沈飞 +4.4%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:47</span><span class="arw up">↑</span><span class="bd">消费电子</span><span class="pc up">+0.8%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 —</span><span>未校验</span><span class="lead">立讯精密 +3.6%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:41</span><span class="arw down">↓</span><span class="bd">CRO</span><span class="pc down">−1.6%</span></div>
+            <div class="l2"><span class="lvl">中</span><span>放量 1.7x</span><span>当前 −2.1%</span><span class="lead">药明康德 −5.0%</span></div>
+          </div>
+          <div class="ev">
+            <div class="l1"><span class="t">09:33</span><span class="arw up">↑</span><span class="bd">券商</span><span class="pc up">+1.2%</span></div>
+            <div class="l2"><span class="lvl">弱</span><span>放量 1.4x</span><span>当前 +1.5%</span><span class="lead">东方财富 +3.0%</span></div>
+          </div>
+        </div>
+        <div class="sb"><i style="top:0;height:300px"></i></div>
+      </div>
+    </div>
+    <div class="caption">
+      <span class="k">浅色主题</span><b>跟随主窗主题</b>
+      <p style="margin:6px 0 0">切换主题时立即换色，键名与 <code>THEMES</code> 一致；红涨绿跌在浅色下取深一档，保证白底可读。</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  var bMenu = document.getElementById('b-menu');
+  var mMain = document.getElementById('m-main');
+  bMenu.onclick = function(){
+    var on = mMain.classList.toggle('show');
+    bMenu.classList.toggle('on', on);
+    bMenu.textContent = on ? '收起小窗右键菜单' : '显示小窗右键菜单';
+  };
+
+  var bDim = document.getElementById('b-dim');
+  bDim.onclick = function(){
+    var on = bDim.classList.toggle('on');
+    bDim.textContent = on ? '隐藏尺寸标注' : '显示尺寸标注';
+    var ws = document.querySelectorAll('.dim');
+    for (var i = 0; i < ws.length; i++) ws[i].classList.toggle('show', on);
+  };
+
+  var bTip = document.getElementById('b-tip');
+  bTip.onclick = function(){
+    var on = bTip.classList.toggle('on');
+    bTip.textContent = on ? '隐藏指标说明' : '显示指标说明';
+    var ps = document.querySelectorAll('.pop');
+    for (var i = 0; i < ps.length; i++) ps[i].classList.toggle('pin', on);
+  };
+
+  /* 悬停问号即显示说明（pin 为按钮固定态，与悬停互不干扰） */
+  var qs = document.querySelectorAll('.qi');
+  for (var q = 0; q < qs.length; q++){
+    (function(el){
+      var pop = el.closest('.win').querySelector('.pop');
+      el.onmouseenter = function(){ pop.classList.add('show'); };
+      el.onmouseleave = function(){ pop.classList.remove('show'); };
+    })(qs[q]);
+  }
+
+  var sel = document.querySelectorAll('.menu u');
+  for (var i = 0; i < sel.length; i++){
+    (function(el){
+      el.onmouseenter = function(){
+        for (var k = 0; k < sel.length; k++) sel[k].classList.remove('sel');
+        el.classList.add('sel');
+      };
+    })(sel[i]);
+  }
+</script>
+</body>
+</html>

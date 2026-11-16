@@ -7,10 +7,10 @@
 | 项 | 内容 |
 | --- | --- |
 | 项目名称 | 盯盘君 MarketEye |
-| 文档版本 | v1.0.0 |
+| 文档版本 | v1.2.2 |
 | 版本状态 | 未发布 |
 | 创建日期 | 2026-11-10 |
-| 更新日期 | 2026-11-10 |
+| 更新日期 | 2026-11-16 |
 | 基于需求 | [PRD-盯盘君-盘面速览-v1.0.0](../../需求文档/盘面速览/v1.0.0/PRD-盯盘君-盘面速览-v1.0.0.md) |
 | 基于设计 | 无（全新模块） |
 
@@ -23,6 +23,9 @@
 | v1.1.0 | 2026-11-11 | - | 增量 | §3.2.1/§3.4/§3.5/§3.7/§4.1/§10 | 用户三项反馈落地：①量能段改为「箭头 + 带符号金额」（R-12/T015，定宽样本改 `↓-1.20万亿`）；②悬停量能段弹明细、悬停白黄线段弹沪深涨跌家数（R-13/T016，单 Toplevel 复用 + 鼠标穿透）；③数据源由 `sh_a` 改 `hs_a`（D8：一次 8.0 秒 vs 两次 12.6 秒，沪市样本仍 2318 只），新增 `sv_updown`/`sv_amt_diff_text` 与整轮 30 秒总预算（T013/T014，家数不含北交所 D9）；事件载荷由 `("sv", mean)` 改为 `("sv", (mean, stats))` |
 | v1.1.2 | 2026-11-11 | - | 增量 | §3.4/§3.5/§5 | BUG-12 返修 R-11：点击桌面空白时前台切成 Progman（矩形铺满整屏、pid 非本进程），被误判为遮罩致悬浮框消失、点回悬浮框又恢复。`foreign_fullscreen` 增加 Shell 类名排除（Progman/WorkerW/Shell_TrayWnd/Shell_SecondaryTrayWnd） |
 | v1.1.1 | 2026-11-11 | - | 增量 | §3.5 | 家数浮层行内分色：行内容升级为「str 或片段表」，上涨数字 `theme["up"]` 红、下跌数字 `theme["down"]` 绿，标签与平盘/合计/时点保持基色；宽度与落笔均改为按片段累加（避免整行量宽与分段落笔混用导致右侧截字） |
+| v1.1.3 | 2026-11-16 | - | 增量 | §3.1/§3.2.3/§3.4/§3.5/§3.6/§3.7/§4.1/§10 | 量能明细浮层新增累计成交额走势图（PRD v1.1.3 R-15）：复用腾讯 5 日分时接口（与基准同源、同解析器），今日实线 vs 昨日同期虚线、全天 5 分钟聚合；数据按需取（悬停才取、TTL 120 秒、不计入 `AMT_REQ_LIMIT`），尾部用实时累计额对齐当前分钟；D11/D12、T017/T018/T019 |
+| v1.2.0 | 2026-11-16 | - | 增量 | §3.1/§3.4/§3.5/§3.7/§4.1/§10 | 走势图指针定位（PRD v1.2.0 R-16/R-17）：新增 `_tr_geo`（绘制几何 + 两条序列的快照）、`_hover_draw`/`_hover_tick`/`_hover_zone`/`amt_ax_time`、`SV_HOVER_MS=90`。浮层是 `WS_EX_TRANSPARENT` 点击穿透窗口，收不到 `<Motion>`，定位改**主动取样**（90ms 轮询 `winfo_pointerxy` 换算到浮层坐标）；同时把浮层并入存活判定（原 `_leave_check` 只认悬浮框矩形，指针一碰到浮层就被当「已离开」收起，定位功能根本无从使用）。定位件单独一套 `hover` tag，绘制排在 `trend` 之后恒在最上层 |
+| v1.2.2 | 2026-11-16 | - | 增量 | §3.5/§3.7.2/§3.7.3/§4.1/§10 | 浮层版式（PRD v1.2.2 R-18）：量能浮层宽度由「文字宽与 `SV_TREND_W` 取大」改为**等于悬浮框 `self.W`**（左边缘对齐、右边缘齐平）；文字明细由单列八行改为**三列两行 + 口径尾注**，列宽按实测内容排、余量均分到列间距（`tip_cols_at`，钳 `[px(10), px(30)]`，超宽退最小间距不压字）；`SV_TREND_H` 96→150，图区随浮层拉宽；新增 `_tip_amt_cells`/`_tip_cols_at`/`_tip_amt_draw`/`_tip_seg_text`，`_tip_rows_for` 只服务家数浮层 |
 
 ### 1.3 技术选型
 
@@ -101,6 +104,10 @@ graph LR
 | `self.sv_fails` | 整数 | 连续失败轮数，成功清零；≥3 置 `sv_yellow=None` |
 | `self.sv_thread` | Thread/None | 黄线轮询 daemon，随开启创建、退出即止 |
 | `self.sv_closed_shot` | 布尔 | 收盘态是否已完成定格快照 |
+| `self.amt_trend`（v1.1.3） | `dict / None` | 走势图数据：`today`/`prev`（241 定长累计序列）、`last_ax`（今日有效末轴）、`prev_date`、`at`（取数时刻） |
+| `self.amt_trend_at`（v1.1.3） | 浮点 | 缓存时间戳（`time.time()`），TTL 判定用 |
+| `self.amt_trend_busy`（v1.1.3） | 布尔 | 取数线程门闩，防连续悬停重复起线程 |
+| `self.amt_trend_fail`（v1.1.3） | 布尔 | 最近一次取数失败（图区降级提示用），成功即清 |
 
 ```mermaid
 classDiagram
@@ -156,6 +163,15 @@ classDiagram
 #### 3.2.2 腾讯行情与日 K（既有，零新增请求）
 
 上证段读主窗 `self.data["sh000001"]`（`price`/`pct`，两市成交额模块已强制该代码进取数清单，见 `codes()` 3316-3322；**前置条件：`show_amount` 开启**——用户关闭成交额块后该代码不再被取到，上证段与判词将按 §3.6 降级「—」，此为可接受的取舍）；量能段读 `self._amt_values()`（复用既有基准与今日累计推导，含 S0~S5/D0~D3 全部降级语义）。
+
+#### 3.2.3 沪深分时成交额序列（新增，按需；v1.1.3）
+
+- **接口地址**：`https://web.ifzq.gtimg.cn/appstock/app/day/query?code=sh000001`（深市换 `sz399001`）——与「两市成交额基准」`fetch_amt_base` **同源同接口**，解析器 `_amt_day_series`（766）可直接复用，不新增解析逻辑。
+- **返回形态**：近 5 个交易日，每日一组 `时间 价格 成交量 累计成交额(元)` 逐分钟记录。**今日这一组盘中实时到当前分钟**（2026-11-16 11:20 实测：111 条、末条 `1120`、累计 4051 亿，与实时行情 4048 亿吻合），前 4 日各 242 条完整。
+- **本模块用法**：取 `days[-1]`（今日）与 `days[-2]`（上一交易日），两市按分钟轴相加得两条 241 定长累计序列；只用于走势图，不参与基准与判词。
+- **当日有效长度（关键）**：`_amt_merge_series` 对缺失轴沿用上一值——这是为基准计算设计的（累计额单调，补零会让曲线掉头），但用在今日序列上会把「当前时刻之后」全部填平。走势图必须自行求 `last_ax = max(sh 今日最大轴, sz 今日最大轴)`，**只画 `[0, last_ax]`**，否则今日线会凭空延伸到 15:00。
+- **节奏与预算**：**只在鼠标悬停量能段时按需取**，缓存 TTL `SV_TREND_TTL=120` 秒；两个 symbol 串行，实测 0.37~0.41 秒（比基准的两次 `_amt_day_series` 同量级）。**不计入 `AMT_REQ_LIMIT`**：该限额是基准请求的日配额（8 次），走势图若共用会把基准挤成 D2，量能段整体失效。
+- **异常约定**：超时 8 秒；任一 symbol 失败整体判失败（缺一侧无法合成两市累计），失败不清空旧缓存（旧图仍可展示，仅标注时点），无缓存则图区降级「走势暂不可用」。只许 daemon 线程调用。
 
 ### 3.3 业务流程
 
@@ -253,6 +269,7 @@ sequenceDiagram
 | R-12 量能差额展示 | `_fill` 取 `_amt_values(st, ax)[2]`（diff）→ `sv_amt_diff_text(diff)`：`↑`/`↓`/`→` + `fmt_signed_amount(diff)`；`diff is None` → 「—」。配色沿用主窗 `c_diff` 口径（正红负绿零灰）。**判词仍用 `pct`**，展示与判定分离 |
 | R-13 悬停明细 | `<Motion>` 命中槽位即启 300ms 延时 `after`（`SV_TIP_DELAY`），`<Leave>`／`<Button-1>`／`_yield_tick` 让位时取消并销毁浮层；浮层为独立 `Toplevel`（overrideredirect + topmost + `WS_EX_TRANSPARENT` 穿透），矩形+边框（延续裁决 D2，不做圆角色键）。位置：默认悬浮框正上方；上方空间不足则放下方 |
 | R-14 涨跌家数 | 纯函数 `sv_updown(rows)` → `(up, dn, flat, up_sh, dn_sh, up_sz, dn_sz)`：按 `symbol` 前缀取 `sh`/`sz`，`changepercent>0` 升、`<0` 跌、其余（0/空/停牌）平；`bj` 前缀忽略。家数与黄线同轮同批产出，失败一并沿用上一轮（PRD R-14） |
+| R-15 量能走势 | 悬停 `_tip_show("amt")` 时若缓存过期则起 daemon 取 `fetch_amt_trend()`，poll 落地 `amt_trend`；`_tip_fill` 在图区画两条折线——今日 `t["text"]` 实线（width 2）、昨日 `t["sub"]` 虚线（`dash=(3,3)`），x 轴 0~240 按 `SV_TREND_STEP=5` 取 49 点，y 上限 `max(两条末值)×1.06`；轴 120 画午休竖虚线；今日线尾用 `_amt_today()` 覆盖当前轴值（缓存落后则追加一点），保证止于当前时刻（PRD R-15） |
 | M-01 约束（全量） | worker 任一页失败整轮作废，不用部分样本 |
 | M-02 约束（复用基准） | 量能只读 `_amt_values`，不另起基准 |
 | M-03 约束（出屏收回） | 创建与 drop 双处钳制屏幕内 |
@@ -267,9 +284,19 @@ sequenceDiagram
 - **收盘标记**：行尾追加 `flat` 色「休市」小字（仅收盘态显示，id 常驻、收盘态置文本其余态置空串）。
 - **截图让位（R-11）**：独立 250ms 检测链 `_yield_tick`，与 1 秒数据 tick 解耦（数据链不因显隐改变节奏）。隐藏用 `withdraw()` 而非 `lower()`：实测 overrideredirect 窗口 withdraw→deiconify 后 `overrideredirect`／位置／`-topmost` 三者均保持；`lower()` 只能把窗口降回 topmost 带内底部，压不住「非 topmost 的全屏遮罩」，等于白降。窗口宽度 `W` 与高度 `H` 为定值，恢复时用缓存位置显式重设 geometry，避免 deiconify 后落到 (0,0)。**Shell 排除（BUG-12）**：只按几何判定会把「点击桌面空白」误判成遮罩——点击桌面后前台切成 `Progman`（explorer.exe），其窗口矩形恰好铺满整屏且 pid 必非本进程，两条件全中。修复：`GetClassNameW` 命中固定类名表（`Progman`/`WorkerW`/`Shell_TrayWnd`/`Shell_SecondaryTrayWnd`）直接返回 False。类名是系统契约，不会像截图工具进程名那样随版本漂移。
 - **量能段（R-12）**：单 `text` 项（原「词 + 数值」两个 text 合并为一个），文案 `sv_amt_diff_text(diff)`＝箭头 + `fmt_signed_amount`，如 `↑+388亿`／`↓-388亿`／`→0.0亿`。定宽样本由「缩量 -99%」改为 **`↓-1.20万亿`**（箭头 + 负号 + 4 位数字 + 2 位小数 + 单位，最坏形态）。该段热区随 `_layout` 记录 `self.hot["amt"] = (x, x + w)`。
-- **悬停浮层（R-13）**：`self.tip` 单个 `Toplevel` 复用两个内容模板（按 `kind` 重填），`overrideredirect(True)` + `bg=t["head"]` + `highlightthickness=1`，矩形四角（裁决 D2：SView 家族不做圆角色键，规避圆角血泪史）。内容用 `create_text` 多行排版，宽高由 `font.measure` 实测后 `geometry(f"{w}x{h}+{x}+{y}")`（overrideredirect 必须带尺寸）。位置：`y = sview_y - h - px(6)`；若 `y < 0` 则改放下方 `sview_y + H + px(6)`。鼠标穿透补 `WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`（沿用 `Panel._amt_tip_click_through` 的 argtypes 写法，项目铁律）。
+- **悬停浮层（R-13）**：`self.tip` 单个 `Toplevel` 复用两个内容模板（按 `kind` 重填），`overrideredirect(True)` + `bg=t["head"]` + `highlightthickness=1`，矩形四角（裁决 D2：SView 家族不做圆角色键，规避圆角血泪史）。内容用 `create_text` 多行排版，宽高由 `font.measure` 实测后 `geometry(f"{w}x{h}+{x}+{y}")`（overrideredirect 必须带尺寸）。**量能浮层宽度 = 悬浮框 `self.W`**（v1.2.2）：悬浮框本身是定宽的（五段最坏样本 + 间距 + 内边距算出），浮层跟着它取同宽，左右边缘对齐，视觉上像挂在悬浮框下面的同一块面板；家数浮层内容短，仍取文字自然宽。位置：`y = sview_y - h - px(6)`；若 `y < 0` 则改放下方 `sview_y + H + px(6)`。鼠标穿透补 `WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`（沿用 `Panel._amt_tip_click_through` 的 argtypes 写法，项目铁律）。
 - **两段浮层内容**：
-  - 量能段：`今日累计 / 沪 x 深 y / 基准时点 / 昨日基准 / 差额 / 比例 / 口径`（与主窗 `_amt_tip_show` 同文案，SView 侧独立生成，不依赖 Panel 私有方法）。
+  - 量能段（v1.1.3）：**上为走势图、下为文字明细**。
+    - 图区：宽 `W − 2×pad`（W 即悬浮框宽，v1.2.2 起浮层同宽，图区随之拉满）、高 `px(SV_TREND_H)=px(150)`，与文字同一个 Canvas（裁决 D11）。x 轴 0~240 映射到图宽，按 `SV_TREND_STEP=5` 从两条 241 定长序列各取 49 点（轴 0,5,…,240）；y 轴 0~`max(今日末值, 昨日末值)×1.06`。今日线 `t["text"]` 实线 `width=2`，昨日线 `t["sub"]` 虚线 `width=1, dash=(3,3)`；轴 120（11:30/13:00）处画 `t["line"]` 竖虚线折叠午休；另画 0 / 50% / 100% 三条水平网格线（`t["line"]`）。左上角两行图例兼数值：「今日 x.xx万亿」（实线样本）与「**昨日全天** x.xx万亿·MM-DD」（虚线样本）。「全天」二字不可省：文字明细里的「昨日基准」是**昨日同一时点**的累计额（如昨日 11:29 的 9763 亿），与图例的全天值（1.66 万亿）是两个口径，不标注会被当成矛盾。图例底衬一块 `t["head"]` 色矩形（宽 `px(178)`），避免虚线穿过文字。
+    - **尾部对齐**：绘前把今日线在当前轴的值替换为 `_amt_today()`（实时两市累计）；若当前轴大于缓存 `last_ax`，则追加一个点（轴=当前轴）。这样缓存落后最多一个 TTL 也不会让线尾停在旧值，且与量能段的差额同源同刻。非交易时段不追加（午休止于 120、收盘止于 240），与 `calc_amt_state` 一致。
+    - 文字明细（v1.2.2 三列版式，R-18）：`_tip_amt_cells()` 返回 `(cols, foot)`，`cols` 三列两行——**今日**（今日累计 / 沪 x 深 y）、**昨日**（昨日基准 / 基准时点）、**对比**（差额 / 比例），`foot` 为一行口径尾注「沪深两市合计 · 不含北交所」。列排布由 `tip_cols_at(widths, w, pad, g_min, g_max)` 算：列宽 = 本列「标签宽 + 6 + 值宽」的最大值（标签列宽取本列所有标签的 `measure` 最大值，逐行对齐），余量均分到列间距并钳在 `[px(10), px(30)]`——余量足时把列摊开填满整幅，不足时退到最小间距，优先保证不压字；极端宽值（如 `沪 12345亿 深 23456亿` + `+123.4%`）实测仍不越右内边距。绘制走 `_tip_amt_draw`，标签 `t["sub"]`、数值各自着色，每段独立 `create_text` 后按 `measure` 累加 x（与分色行同口径）。信息项与主窗 `_amt_tip_show` 同源，SView 侧独立生成，不依赖 Panel 私有方法；行数由 8 降到 3，省出的高度给图区。
+    - 降级：无数据且未失败 → 图区居中一行「走势加载中…」；`amt_trend_fail` 且无缓存 → 「走势暂不可用」；有旧缓存但取数失败 → 照常画旧图，图例后缀「·数据未刷新」。图区降级不影响文字明细。
+    - **重绘纪律（v1.1.3 实测踩坑）**：Canvas 内容按 `frame`/`txt`/`trend` 三套 tag 分开重建，曲线每秒重画、文字仅在内容变化时重排——整块 `delete("all")` 会让文字每秒闪一次。但**主题切换必须整块重建**：只重画文字会让新主题的深色字落在旧主题的深色底上（实测切浅色后浮层仍是深底黑字，几乎不可读）。判定用 `self._tip_theme is not self.theme`，命中即 `delete("all")` + 重设 `cv`/Toplevel 底色 + 重画边框。
+    - **指针定位（v1.2.0 / R-16）**：第四套 tag `hover`（竖虚线 + 两个数据点 + 读数标签），`_tip_trend` 结束前把几何与序列存进 `self._tr_geo`（`x0/y0/w/h/ymax/today/prev/last`），随后 `_hover_draw()` 自己重画一遍——顺序保证定位件在 `trend` 之上，且每秒曲线重画后自动补回。
+      - **为什么用轮询**：浮层是 `WS_EX_TRANSPARENT` 穿透窗口，指针在它上面的 `<Motion>` 一律不投递（穿透的代价），且指针压在浮层上时下方的 SView 也收不到事件。故 `_hover_tick` 以 `SV_HOVER_MS=90` 主动 `winfo_pointerxy()` 取样，减去浮层 `rootx/rooty` 得到画布坐标（Tk 的两个坐标系同为物理像素，150% 缩放下也无需再换算）。
+      - **吸附与读数**：`ax = round((px−x0)×240/w)` 钳到 0~240（1 分钟分辨率；v1.2.2 图区宽约 584px，约 2.4px/分钟，指针位移 1px 内不跳变）；今日值取 `today[ax]` 但仅当 `ax ≤ last`（`last` 是今日曲线末轴，盘中会小于 240），否则显 `—`；昨日值恒取 `prev[ax]`。标签两行——「`amt_ax_time(ax)` 今日 x.xx万亿」「昨日同期 y.yy万亿　差 `sv_amt_diff_text(tv−pv)`」，右/上放不下时翻到左/下并钳在图区内。标签走片段表绘制（同 `_tip_segs` 口径，逐段 `measure` 累加定位），宽度按片段和 ×1.10 + 内边距。
+      - **着色口径（用户 2026-11-16 追加）**：今日值按「与昨日同期比较」着色——`tv > pv` → `t["up"]` 红、`tv < pv` → `t["down"]` 绿，持平或任一为 None → `t["text"]`；差额按符号着色——`diff > 0` 红、`< 0` 绿、`== 0`/None → `t["flat"]`。与主窗涨红跌绿一致；昨日值恒 `t["text"]`，时间与「今日 / 昨日同期 / 差」等标签字恒 `t["sub"]`。
+      - **存活域（R-17）**：`_hover_zone(px, py)` 判「悬浮框 ∪ 浮层（上下各放宽 8px 补 6px 缝隙）」，`_leave_check` 与 `_hover_tick` 共用。原实现只认悬浮框矩形：指针从量能段挪向浮层即被判「已离开」，120ms 后浮层被销毁——定位功能一碰就没了。轮询同时兼作浮层守卫（指针彻底离开两窗即 `_tip_cancel`），浮层收起后轮询自行停止，下次 `_tip_create` 再起。
   - 白黄线段：`沪深上涨 x 下跌 y` / `平盘 z 合计 n` / `沪 up/dn · 深 up/dn` / 数据时点。家数为 `None` 时整块显示「—（家数暂不可用）」。
   - **行内分色**：行内容为 `str`（整行基色）或片段表 `[(文本, 颜色), ...]`。家数行的上涨数字用 `theme["up"]`（红）、下跌数字用 `theme["down"]`（绿），标签、平盘、合计、沪/深前缀与 `/` 分隔符沿用行基色；绘制按片段累加 `font.measure` 定位，宽度亦按片段求和——与单 `create_text` 整行落笔会有微米级字距差，故不可混用两种宽度算法（否则右侧截字）。行内容参与 `_tip_rows` 相等比较，涨跌翻转即重绘。
 - **颜色键透明**：不使用（裁决 D2，矩形+边框）。
@@ -284,6 +311,7 @@ sequenceDiagram
 | 量能比例 None（基准不可用） | 量能段「—」、判词「—」 | 静默降级 | 复用 amt 模块日志 |
 | 配置落盘失败 | 显隐照常，不阻断 | 静默 | `log_once("sview save 失败")` |
 | worker 线程异常逃逸 | 函数级 try/except 全包，不中断循环 | 静默 | `_dbg("sv worker {ex!r}")` |
+| 分时序列取数失败（走势图） | 置 `amt_trend_fail`；保留旧缓存继续展示 | 图区「走势暂不可用」或旧图+「数据未刷新」 | `_dbg("amt trend 失败")` |
 
 ### 3.7 其他设计
 
@@ -306,6 +334,12 @@ sequenceDiagram
 | `SV_AMT_TH` | `5.0` | 量能放缩阈值（%，PRD R-02） |
 | `SV_AMT_ZERO` | `5e6` | 量能差额噪声钳制（元）：绝对值 < 0.05 亿显「→0.0亿」（R-12） |
 | `SV_TIP_DELAY` | `300` | 悬停明细浮层延时（毫秒，R-13） |
+| `SV_TREND_W` | `272` | 走势图区**最小**宽（逻辑像素；v1.2.2 起浮层与悬浮框等宽，此值仅在悬浮框更窄时兜底） |
+| `SV_TREND_H` | `150` | 走势图区高（逻辑像素，v1.2.2 由 96 提高；文字压到三行后省出的高度全给曲线） |
+| `SV_TREND_STEP` | `5` | 走势图 x 轴聚合步长（分钟，49 点） |
+| `SV_TREND_TTL` | `120` | 走势图数据缓存有效期（秒） |
+| `SV_TREND_DASH` | `(3, 3)` | 昨日线虚线样式 |
+| `SV_HOVER_MS` | `90` | 走势图指针定位轮询间隔（毫秒，v1.2.0；实测 90ms 手滑无感、CPU 可忽略） |
 | `SV_H` | `30` | 悬浮框高度（逻辑像素） |
 | `SV_GAP` | `10` | 段间距（逻辑像素） |
 | `SV_WORST` | dict | 各段最宽样本：`黄▼白 −9.9%` / `沪 39999.99 +9.99%` / `缩量 −99%` / `缩量·权重领跌` / `休市`（定宽测量用） |
@@ -318,6 +352,10 @@ sequenceDiagram
 | `sv_verdict` | `(pct_sh, yellow, amt_pct) -> str / None` | 三段判定值 → 判词短语：量能词（放量/平量/缩量，amt_pct None → 整体 None）·结构词（PRD R-10 矩阵）；任一入参 None → None |
 | `sv_updown`（v1.1.0） | `(rows) -> dict / None` | 全量 rows → `{"up","dn","flat","up_sh","dn_sh","up_sz","dn_sz"}`：按 `symbol` 前缀取 `sh`/`sz`（`bj` 忽略），`changepercent>0` 升、`<0` 跌、其余平；空 rows → None |
 | `sv_amt_diff_text`（v1.1.0） | `(diff) -> str` | 差额 → `↑+388亿`／`↓-388亿`／`→0.0亿`；`None` → 「—」。箭头语义与主窗 `_amt_diff_parts` 一致 |
+| `amt_trend_points`（v1.1.3） | `(series, last_ax, step) -> list` | 241 定长累计序列 → `[(轴, 值), ...]`，取 `0, step, 2×step, …` 且不超过 `last_ax`；末点补 `last_ax`（非 step 整数倍时也落一点，保证线尾精确到当前分钟）；`last_ax < 0` 或序列空 → `[]` |
+| `amt_trend_scale`（v1.1.3） | `(today_last, prev_last) -> float` | y 上限：`max(两末值) × 1.06` 后向下取整到 100 亿的整数倍（防 1 秒刷新导致刻度抖动）；两者皆 None → `0`（图区退化为空网格） |
+| `amt_ax_time`（v1.2.0） | `(ax) -> str` | 分钟轴 → `HH:MM`：`0~120` 映射 09:30~11:30，`121~240` 映射 13:01~15:00，入参钳到 `[0,240]`（120 同时是 11:30 与 13:00，显示取前半场） |
+| `tip_cols_at`（v1.2.2） | `(widths, w, pad, g_min, g_max) -> list` | 浮层多列起点：`slack = (w − 2×pad) − Σwidths`，间距 `g = clamp(slack ÷ (列数−1), g_min, g_max)`，逐列累进得各列 x。余量足则把列摊开填满整幅（右侧不留大片空白），不足则退 `g_min` 宁略微超宽也不压字 |
 
 | 裁决 | 内容 | 理由 |
 | --- | --- | --- |
@@ -331,6 +369,9 @@ sequenceDiagram
 | D8 节点改 hs_a（v1.1.0） | 一次拉沪深全量，`symbol` 前缀 `sh` 过滤出沪市样本求黄线，全量算家数：单轮 8.0 秒；改拉 `sh_a`+`sz_a` 要 12.6 秒且两次失败面；东财 `f104/f105/f106` 实测返回 `0/0/100` 不可用 | 省一半时间、黄线与家数天然同批（PRD 约束「不得单独另取一份」）；沪市样本数与 `sh_a` 完全一致（实测 2318） |
 | D9 家数不含北交所（v1.1.0） | `hs_a` 含 355 只 `bj`，一律不计入沪深合计与涨跌分类 | 用户口径为「沪深全市场」；北交所体量小且涨跌幅规则不同，混入会污染口径 |
 | D10 浮层复用单个 Toplevel（v1.1.0） | 两段浮层共用一个窗口，按 `kind` 重填内容，不做两个窗口 | 同屏只可能有一个浮层（鼠标只能在一处）；单窗口免去并发显示与销毁竞态 |
+| D11 走势图画在浮层同一 Canvas（v1.1.3） | 不开第二个 Toplevel、不用 `Label`+`PhotoImage` 贴图 | 浮层已有 Canvas 且尺寸随内容重算；另起窗口要再处理穿透/定位/随浮层销毁三件事；`PhotoImage` 需逐像素生成，中文小窗里纯属自找麻烦 |
+| D12 走势数据按需取、不常驻轮询（v1.1.3） | 悬停触发、TTL 120 秒、单独门闩，不进 `AMT_REQ_LIMIT` | 曲线只在浮层可见时有意义，常驻轮询是纯浪费；共用基准配额会把量能段整体挤成 D2 |
+| D13 浮层与悬浮框同宽 + 三列版式（v1.2.2） | 量能浮层宽取 `self.W`（悬浮框定宽），文字改三列两行 + 口径尾注，图区高 96→150 | 悬浮框是定宽面板，浮层宽度另算会左右不齐、右半幅留白；单列八行把信息竖着堆，既浪费横向空间又挤走曲线高度。信息项一条不删，只换排布。列宽按实测排（`tip_cols_at`）而不是写死坐标，因为金额/比例宽度随行情变化，写死必压字 |
 
 #### 3.7.3 线程与定时器
 
@@ -340,6 +381,8 @@ sequenceDiagram
 | `SView.tick` | 1 秒 | 数据/主题/置顶统一刷新入口；收盘定格后只比对主题置顶、跳过数值重绘；随窗口销毁终止 |
 | `SView._yield_tick` | 250ms | 截图让位检测（R-11）；只做一次 `GetForegroundWindow`+`GetWindowRect`，与数据链解耦；让位期间数据 tick 照常跑（对隐藏窗口 `itemconfig` 无副作用），恢复即最新值，无补帧逻辑 |
 | `SView` 悬停延时 | 单次 300ms（`SV_TIP_DELAY`） | 进入热区启 `after`，离开/拖动/让位即 `after_cancel`；不常驻轮询，无指针时零开销 |
+| 走势数据按需取（v1.1.3） | 悬停量能段且缓存超 `SV_TREND_TTL` 时一次 | daemon 线程，`amt_trend_busy` 门闩防重入；结果经 poll 落地后由下一拍 `tick` 重绘；失败置 `amt_trend_fail` 但不频繁重试（等下一次 TTL 过期） |
+| `SView._hover_tick`（v1.2.0） | 90ms，仅量能浮层存在期间 | 指针定位取样 + 浮层存活守卫（R-16/R-17）。浮层收起即自行停表，不常驻；两窗都碰不到指针时调 `_tip_cancel` 收浮层 |
 | `Panel.poll` 新分支 | 250ms 既有循环 | `sv`/`sv_err` 两个 kind，独立 try 包裹，只写状态不渲染 |
 | `sv_worker` 整轮预算 | 每轮 ≤30 秒（`SV_TOTAL_BUDGET`） | 56 页 × 8 秒单页超时的最坏叠加 448 秒，必须有总闸；超预算整轮作废并计入失败轮次 |
 
@@ -350,13 +393,19 @@ sequenceDiagram
 - 阈值边界：diff=±0.05、pct_sh=±0.05、amt=±5.0 的边界归属断言。
 - `sv_updown`（v1.1.0）：构造含 `sh`/`sz`/`bj` 前缀与空值的样本，断言沪/深分别计数、`bj` 不入合计、空值计平盘。
 - `sv_amt_diff_text`（v1.1.0）：正/负/零/None 四态与单位跃迁（亿 / 万亿）断言。
+- `amt_trend_points`（v1.1.3）：121 点长度、`last_ax=140` 的序列断言取点为 0,5,…,140（29 点，末点为 140 而非 135）；`last_ax=0` 只返回 1 点；空序列返回空表。
+- `amt_trend_scale`（v1.1.3）：`(8000e8, 9000e8)` → `9540e8` 向下取整到 100 亿的整数倍；含 None 时退化为单值；双 None → 0。
+- `amt_ax_time`（v1.2.0）：0→09:30、60→10:30、120→11:30、121→13:01、240→15:00，越界 −5→09:30 / 999→15:00 钳制。
+- 指针定位（v1.2.0，桩实例 + 真实 Canvas 绘制）：把指针设到图区某轴位后断言 `hover` tag 的件数与标签文本（10:30 位 → 「10:30 今日 …」「昨日同期 …」）；指针移到今日末轴右侧 → 今日显「—」而昨日仍有值；指针移出图区 → `hover` 件清空、浮层保留；指针移到浮层文字区 → 浮层存活；指针远离两窗 → 浮层收起且轮询停表。
+- `tip_cols_at`（v1.2.2）：`[185,171,118]` @ 612 宽 → 起点 `[14,244,460]` 且末列右端不越 `612−14`；超宽 `[300,300]` @ 500 → 间距退到 `g_min` 不退成负数（不重叠）；单列只返回 `[pad]`。
+- 浮层版式（v1.2.2，桩实例 + 真实 Canvas 绘制）：断言浮层宽严格等于 `self.W`（与悬浮框同宽）、三列两行 + 口径尾注共 16 个文字件、极端宽值（`沪 12345亿 深 23456亿` + `+123.4%`）下末列右端仍不越右内边距；深/浅两主题各出一张实录截图。
 
 ### 3.8 功能点追溯
 
 | PRD 功能点 | 技术产物 |
 | --- | --- |
 | F-01 三维度快照展示 | `sv_yellow_mean`/`sv_verdict`（§3.7.2）、`SView.render` 四段渲染与定宽测量（§3.5）、上证/量能数据接入（§3.2.2/链路 3）、R-01~R-04/R-10（§3.4）、T002/T004/T008 |
-| F-02 悬浮框窗口行为 | `SView` 窗口类拖动/右键/位置记忆（§3.5）、`sview_on/x/y` 配置键（§3.1）、`Panel.toggle_sview`+菜单勾选行（§3.3 链路 1）、R-06/R-07（§3.4）、T004/T005 |
+| F-02 悬浮框窗口行为 | `SView` 窗口类拖动/右键/位置记忆（§3.5）、`sview_on/x/y` 配置键（§3.1）、`Panel.toggle_sview`+菜单勾选行（§3.3 链路 1）、R-06/R-07（§3.4）、T004/T005；量能走势图 `fetch_amt_trend`/`amt_trend_points`（§3.2.3/§3.7.2）、`_tip_fill` 折线绘制（§3.5）、R-15（§3.4）、T017/T018/T019；指针定位 `_tr_geo`/`_hover_draw`/`_hover_tick`/`_hover_zone`/`amt_ax_time`（§3.5/§3.7.2/§3.7.3）、R-16/R-17、T020/T021；浮层版式 `_tip_amt_cells`/`_tip_cols_at`/`_tip_amt_draw`/`tip_cols_at`（§3.5/§3.7.2）、R-18、T022 |
 | F-03 数据刷新与容错 | `fetch_sina_sh`/`sv_worker`（§3.2.1/§3.7.3）、poll `sv`/`sv_err` 分支与失败计数（§3.3 链路 2）、收盘态门控与定格（§3.3 链路 4）、R-05/R-08/R-09（§3.4）、T003/T006/T007 |
 
 ## 4. 代码位置
@@ -369,10 +418,11 @@ sequenceDiagram
 | --- | --- |
 | `ticker.pyw:154`（AMT 块尾）后 | 新增 `SV_*` 常量（T001） |
 | `ticker.pyw:416`（`page_slice`）后的模块级函数区 | 新增 `sv_yellow_mean`/`sv_verdict`（T002） |
-| `ticker.pyw:451`（`sv_yellow_mean` 旁） | 新增 `sv_updown`/`sv_amt_diff_text`（T013，v1.1.0） |
+| `ticker.pyw:451`（`sv_yellow_mean` 旁） | 新增 `sv_updown`/`sv_amt_diff_text`（T013，v1.1.0）；`amt_trend_points`/`amt_trend_scale`（T017，v1.1.3） |
+| `ticker.pyw:799`（`_amt_merge_series`）后 | 新增 `fetch_amt_trend`（T017，v1.1.3，daemon 专用，复用 `_amt_day_series`） |
 | `ticker.pyw:903`（`fetch_minute`）附近的取数函数区 | 新增 `fetch_sina_sh`（T003） |
 | `ticker.pyw:4024`（`SView` 类定义）前 | 新增 `_ff_make`/`foreign_fullscreen` 模块级探测函数（T012，R-11） |
-| `ticker.pyw:3188`（`Panel.poll`） | 新增 `sv`/`sv_err` 分支 + `_sv_apply`（T006） |
+| `ticker.pyw:3188`（`Panel.poll`） | 新增 `sv`/`sv_err` 分支 + `_sv_apply`（T006）；`amt_trend`/`amt_trend_err` 分支（T018，v1.1.3） |
 | `ticker.pyw:1386` 附近（`__init__` 状态区） | `sv_*` 状态初始化（T005） |
 | `ticker.pyw:3668`（`toggle_top`）/`3513`（`reload`） | 置顶联动与配置重读（T005） |
 | `ticker.pyw:7153`（`selftest`） | 断言段扩展（T010） |
@@ -383,6 +433,7 @@ sequenceDiagram
 | --- | --- |
 | `ticker.pyw:3954`（`KlineWin` 类定义）前 | 新增 `SView` 类整段（T004/T007） |
 | `ticker.pyw:2564`（`_build_menu`）内 2639-2643 区段（`var_top`/折叠展开行附近） | 「盘面速览」勾选行（T005） |
+| `ticker.pyw:4504`（`_tip_show`）/`4560`（`_tip_fill`） | 走势图绘制、尾部实时对齐与三种降级文案（T019，v1.1.3） |
 | `ticker.pyw:3245`（`_tick`） | 不改动（裁决 D6：四段刷新走 `SView.tick`，此处仅确认不新增调用） |
 
 ### 4.3 配置与脚本位置
@@ -453,3 +504,9 @@ Windows 10/11、Python 3.11（tkinter 内置）、可访问新浪与腾讯行情
 | T014 | §3.3/§3.4 | 修改 | worker 事件载荷 `("sv", (mean, stats))`；`_sv_apply` 兼容单值；Panel 状态 `sv_ud`（含 `at`） | 家数与黄线同轮落地（AC-29） | F-03 | 已完成 |
 | T015 | §3.5 | 修改 | `SView._layout` 量能段单 text + `sv_amt_diff_text`；`self.hot` 槽位表；定宽样本改 `↓-1.20万亿` | 量能段差额展示（R-12，AC-25/26） | F-01 | 已完成 |
 | T016 | §3.5/§3.7.3 | 新增 | `SView` 悬停：`<Motion>`/`<Leave>`、`_tip_show`/`_tip_fill`/`_tip_place`/`_tip_cancel`/`_leave_check`、单 Toplevel + 穿透 | 两处悬停明细浮层（R-13，AC-27/28/30） | F-02 | 已完成 |
+| T017 | §3.2.3/§3.7.2 | 新增 | `_amt_merge_series`（799）后、纯函数区（451 旁） | `fetch_amt_trend`（今日/昨日双序列 + `last_ax`）+ `amt_trend_points`/`amt_trend_scale` | F-02 | 待编码 |
+| T018 | §3.1/§3.7.3 | 新增 | `Panel.__init__` 状态区、`Panel.poll` | `amt_trend*` 四状态 + `ensure_amt_trend()`（TTL/门闩/daemon）+ poll 两分支 | F-02 | 待编码 |
+| T019 | §3.5 | 新增 | `SView._tip_show`/`_tip_fill`/`_tip_create` | 图区折线/网格/图例绘制、尾部实时对齐、三种降级（R-15，AC-31~34） | F-02 | 待编码 |
+| T020 | §3.7.4 | 修改 | `selftest` | `amt_trend_points`/`amt_trend_scale` 断言 | F-02 | 待编码 |
+| T021 | §3.5/§3.7.2/§3.7.3 | 新增 | `SView._tr_geo`/`_hover_draw`/`_hover_tick`/`_hover_zone`、`amt_ax_time`；`_leave_check`/`motion`/`_tip_create`/`_tip_cancel` 改造 | 走势图指针定位（竖虚线 + 两点 + 读数标签 + 今日/差额着色）与浮层存活域修正（R-16/R-17，AC-35~37），selftest 新增 `[sv3]` 时间轴断言 | F-02 | 已完成 |
+| T022 | §3.5/§3.7.2 | 修改 | `SView._tip_fill`；新增 `_tip_amt_cells`/`_tip_cols_at`/`_tip_amt_draw`/`_tip_seg_text`、`tip_cols_at`；`SV_TREND_H` 96→150 | 浮层与悬浮框同宽、文字三列两行 + 口径尾注、图区加高（R-18，AC-38/39） | F-02 | 已完成 |

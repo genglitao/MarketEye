@@ -3,6 +3,7 @@ position.json
 ticker.log
 industry_cache.json
 amount_base.json
+block_events.json
 __pycache__/
 *.pyc
 *.bak
