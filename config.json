@@ -45,12 +45,28 @@
       "name": "自选",
       "items": [
         {
-          "code": "sz159865",
-          "alias": "养殖ETF国泰"
+          "code": "sz159142",
+          "alias": "科创创业人工智能ETF景顺"
         },
         {
-          "code": "sz159611",
-          "alias": "电力ETF广发"
+          "code": "sz159915",
+          "alias": "创业板ETF易方达"
+        },
+        {
+          "code": "sh601099",
+          "alias": "太平洋"
+        },
+        {
+          "code": "sh603066",
+          "alias": "音飞储存"
+        },
+        {
+          "code": "sz300182",
+          "alias": "捷成股份"
+        },
+        {
+          "code": "sz159865",
+          "alias": "养殖ETF国泰"
         },
         {
           "code": "sh601658",
@@ -61,28 +77,28 @@
           "alias": "红利ETF西部利得"
         },
         {
-          "code": "sh515120",
-          "alias": "创新药ETF广发"
+          "code": "sh603809",
+          "alias": "豪能股份"
         },
         {
           "code": "sh603486",
           "alias": "科沃斯"
         },
         {
-          "code": "sh601336",
-          "alias": "新华保险"
-        },
-        {
-          "code": "sh603809",
-          "alias": "豪能股份"
-        },
-        {
-          "code": "sz300182",
-          "alias": "捷成股份"
+          "code": "sh515120",
+          "alias": "创新药ETF广发"
         },
         {
           "code": "sz159633",
           "alias": "中证1000ETF易方达"
+        },
+        {
+          "code": "sh601336",
+          "alias": "新华保险"
+        },
+        {
+          "code": "sz159283",
+          "alias": "通用航空ETF南方"
         },
         {
           "code": "sh510510",
@@ -93,8 +109,8 @@
           "alias": "中证2000ETF南方"
         },
         {
-          "code": "sz159142",
-          "alias": "科创创业人工智能ETF景顺"
+          "code": "sz159611",
+          "alias": "电力ETF广发"
         },
         {
           "code": "sz300660",
@@ -157,16 +173,28 @@
           "alias": "山西汾酒"
         },
         {
-          "code": "sz000712",
-          "alias": "锦龙股份"
-        },
-        {
           "code": "sz399852",
           "alias": "中证1000"
         },
         {
           "code": "sz300124",
           "alias": "汇川技术"
+        },
+        {
+          "code": "sz000712",
+          "alias": "锦龙股份"
+        },
+        {
+          "code": "sz001220",
+          "alias": "世盟股份"
+        },
+        {
+          "code": "sz000027",
+          "alias": "深圳能源"
+        },
+        {
+          "code": "sh601006",
+          "alias": "大秦铁路"
         }
       ]
     }
@@ -211,7 +239,10 @@
   },
   "page_size": 20,
   "sview_on": true,
-  "sview_x": 1951,
-  "sview_y": 1480,
-  "folded": true
+  "sview_x": 1946,
+  "sview_y": 1474,
+  "folded": true,
+  "block_on": false,
+  "block_x": 1520,
+  "block_y": 112
 }
