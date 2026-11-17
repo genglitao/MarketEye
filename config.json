@@ -240,9 +240,10 @@
   "page_size": 20,
   "sview_on": true,
   "sview_x": 1946,
-  "sview_y": 1474,
+  "sview_y": 1446,
   "folded": true,
   "block_on": false,
-  "block_x": 1520,
-  "block_y": 112
+  "block_x": 2047,
+  "block_y": 140,
+  "block_folded": true
 }
