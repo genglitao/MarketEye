@@ -5989,6 +5989,7 @@ class BView:
         self._phase = None          # 上次落笔的 (状态, 条数)，变化才重排
         self._menu_ts = 0.0         # 上次弹出时刻（重复投递兜底；菜单为自绘）
         self._menu_open = False     # 右键菜单是否开着（开着时本窗不抢回置顶）
+        self.folded = bool(app.cfg.get("block_folded", False))   # R-21 双击折叠
         self.win = tk.Toplevel(app.root)
         self.win.overrideredirect(True)
         self.win.configure(bg=KEY)
@@ -6033,14 +6034,15 @@ class BView:
                 x = self.win.winfo_screenwidth() - self.W - self.px(8)
             y = app.root.winfo_y()
         x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
-        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
-        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        y = max(0, min(y, self.win.winfo_screenheight() - self.cur_h()))
+        self.win.geometry(f"{self.W}x{self.cur_h()}+{x}+{y}")
         self._layout()
         self.hot = {"qi": self._qi_box}
         # 事件只绑一次（BUG-14，同 SView）：win 与 cv 双绑会让一次右键触发两次
         # menu()，连弹两个菜单被 Windows 立刻顶掉 → 右键菜单一闪而过；
         # 滚轮双绑还会一格翻两倍（3 行变 6 行），一并修掉。
         self.cv.bind("<Button-1>", self.press)
+        self.cv.bind("<Double-Button-1>", self.on_double)   # 双击标题栏折叠（R-21）
         self.cv.bind("<B1-Motion>", self.drag)
         self.cv.bind("<ButtonRelease-1>", self.drop)
         self.cv.bind("<Button-3>", self.menu)
@@ -6057,6 +6059,10 @@ class BView:
     def px(self, v):
         return int(round(v * self.app.s))
 
+    def cur_h(self):
+        """当前窗口高度：折叠 = 标题栏高（R-21 双击折叠）。"""
+        return self.HEAD if self.folded else self.H
+
     # ---------- 绘制 ----------
     def _round(self, x0, y0, x1, y1, r, fill, tag):
         """圆角矩形：竖中带 ∪ 横中带 ∪ 四个 1/4 圆盘（主窗同款手法）。"""
@@ -6069,17 +6075,29 @@ class BView:
                          style="pieslice", fill=fill, outline="", tags=tag)
 
     def _layout(self):
-        """一次性建全部 item（标题栏 6 + 9 行 × 11 + 滚动条 2 + 空态 2）。"""
+        """一次性建全部 item（标题栏 6 + 9 行 × 11 + 滚动条 2 + 空态 2）。
+
+        主体只画到 cur_h()（折叠 = 标题栏）；行/滚动条/空态仍按全高坐标建，
+        折叠时处在画布之外被裁掉，展开重建后自然可见（R-21）。
+        """
         t, c = self.theme, self.cv
-        W, H, R = self.W, self.H, self.px(BW_R)
+        W, R = self.W, self.px(BW_R)
+        H = self.cur_h()
         # 圆角主体：底色 KEY 的区域由 -transparentcolor 透出桌面
-        self._round(0, 0, W, H, R, t["bg"], "body")
-        c.create_rectangle(R, 0, W - R, self.HEAD, fill=t["head"], outline="",
-                           tags="body")
-        c.create_arc(0, 0, 2 * R, 2 * R, start=90, extent=90, style="pieslice",
-                     fill=t["head"], outline="", tags="body")
-        c.create_arc(W - 2 * R, 0, W, 2 * R, start=0, extent=90,
-                     style="pieslice", fill=t["head"], outline="", tags="body")
+        if self.folded:
+            # 折叠态整条都是标题栏色：若沿用「底色矩形 + 顶部色带」，下方两个
+            # 圆角会露出 bg 色（浅色主题 #FFFFFF vs 标题栏 #F3F6FB 肉眼可见）
+            self._round(0, 0, W, self.HEAD, R, t["head"], "body")
+        else:
+            self._round(0, 0, W, H, R, t["bg"], "body")
+            c.create_rectangle(R, 0, W - R, self.HEAD, fill=t["head"],
+                               outline="", tags="body")
+            c.create_arc(0, 0, 2 * R, 2 * R, start=90, extent=90,
+                         style="pieslice", fill=t["head"], outline="",
+                         tags="body")
+            c.create_arc(W - 2 * R, 0, W, 2 * R, start=0, extent=90,
+                         style="pieslice", fill=t["head"], outline="",
+                         tags="body")
         c.tag_lower("body")
         # 标题栏：状态圆点 / 标题 / 问号 / 状态标记 / 今日条数
         hy = self.HEAD / 2
@@ -6139,8 +6157,8 @@ class BView:
             fill=t["line"], width=self.px(8), capstyle="round")
         self.sb_thumb = c.create_line(0, 0, 0, 0, fill=t["bar"],
                                       width=self.px(8), capstyle="round")
-        # 空态两行
-        cy = self.HEAD + (H - self.HEAD) * 0.52
+        # 空态两行（坐标恒按全高：折叠时被画布裁掉，不落进标题栏）
+        cy = self.HEAD + (self.H - self.HEAD) * 0.52
         self.empty1 = c.create_text(W / 2, cy - self.px(8), text="",
                                     fill=t["sub"], font=self.f_nm)
         self.empty2 = c.create_text(W / 2, cy + self.px(12), text="",
@@ -6378,8 +6396,8 @@ class BView:
 
     # ---------- 指标说明浮层（R-20 / D7：画在 Canvas 内） ----------
     def motion(self, e):
-        if self._dragging:
-            return
+        if self._dragging or self.folded:
+            return                      # 折叠态问号浮层无处安放，不响应（R-21）
         x1, x2, y1, y2 = self.hot["qi"]
         inside = x1 <= e.x <= x2 and y1 <= e.y <= y2
         if inside and not self.tip_on:
@@ -6433,10 +6451,43 @@ class BView:
     # ---------- 滚动 / 拖动 / 右键 ----------
     def on_wheel(self, e):
         """滚轮上滚看更早的事件（scroll 加大即向历史翻）。"""
+        if self.folded:
+            return                      # 折叠态无列表，滚轮无意义（R-21）
         n = len(self.app.bw_engine.events)
         step = 3 if e.delta > 0 else -3
         self.scroll = max(0, min(self.scroll + step, max(0, n - self.VIS)))
         self._tip_hide()
+        self.render()
+
+    def on_double(self, e):
+        """双击标题栏折叠 / 展开（R-21，交互对齐主窗折叠轮播）。
+
+        只认标题栏：e.y 超过 HEAD 落在列表区，不响应。Tk 的双击投递会把
+        第二次按下折叠成 <Double-Button-1>（不再触发 press），首击的
+        release 走 drop() 也用 cur_h() 落几何，不会中途把窗口撑开。
+        """
+        if e.y <= self.HEAD:
+            self.toggle_fold()
+
+    def toggle_fold(self):
+        """折叠切换：整块重建（换肤 R-11 同款路径，body 高度随 cur_h）。"""
+        self.folded = not self.folded
+        self._tip_hide()
+        try:
+            self.app.cfg["block_folded"] = self.folded
+            save_json(CONFIG_FILE, self.app.cfg)
+        except Exception as ex:
+            self.app._dbg(f"block_folded 保存失败: {ex!r}")
+        x = max(0, min(self.win.winfo_x(),
+                       self.win.winfo_screenwidth() - self.W))
+        y = max(0, min(self.win.winfo_y(),
+                       self.win.winfo_screenheight() - self.cur_h()))
+        self.win.geometry(f"{self.W}x{self.cur_h()}+{x}+{y}")
+        self.app.cfg["block_x"], self.app.cfg["block_y"] = x, y
+        save_json(CONFIG_FILE, self.app.cfg)
+        self.cv.delete("all")
+        self.tip_on = False
+        self._layout()
         self.render()
 
     def press(self, e):
@@ -6454,8 +6505,8 @@ class BView:
         x = max(0, min(self.win.winfo_x(),
                        self.win.winfo_screenwidth() - self.W))
         y = max(0, min(self.win.winfo_y(),
-                       self.win.winfo_screenheight() - self.H))
-        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+                       self.win.winfo_screenheight() - self.cur_h()))
+        self.win.geometry(f"{self.W}x{self.cur_h()}+{x}+{y}")
         self.app.cfg["block_x"], self.app.cfg["block_y"] = x, y
         save_json(CONFIG_FILE, self.app.cfg)
 
@@ -6470,7 +6521,9 @@ class BView:
         if now - self._menu_ts < 0.15:
             return                       # 同一次右键被重复投递（BUG-14 兜底）
         self._menu_ts = now
-        PopupMenu(self.app, [("清空今日记录", self.app.bw_clear),
+        PopupMenu(self.app, [("折叠 / 展开", self.toggle_fold),
+                             ("-", None),
+                             ("清空今日记录", self.app.bw_clear),
                              ("-", None),
                              ("隐藏", lambda: self.app.toggle_block(False)),
                              ("重置位置", self.reset_pos)],
@@ -6489,8 +6542,8 @@ class BView:
             x = self.win.winfo_screenwidth() - self.W - self.px(8)
         y = self.app.root.winfo_y()
         x = max(0, min(x, self.win.winfo_screenwidth() - self.W))
-        y = max(0, min(y, self.win.winfo_screenheight() - self.H))
-        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        y = max(0, min(y, self.win.winfo_screenheight() - self.cur_h()))
+        self.win.geometry(f"{self.W}x{self.cur_h()}+{x}+{y}")
 
 
 # ---------------------------------------------------------------- K线窗口
@@ -10352,6 +10405,20 @@ def selftest():
         except Exception:
             pass
     print(f"[bw3   ] 存档往返(同日期恢复/异日期清空) {'OK' if rt_ok else '!! 不符'}")
+
+    # 折叠态窗口高（R-21）：展开 = 全高、折叠 = 标题栏高（纯函数，不建窗口）
+    try:
+        class _FoldProbe:
+            HEAD, H = 51, 630
+            folded = False
+
+        fp = _FoldProbe()
+        fold_ok = (BView.cur_h(fp) == 630)
+        fp.folded = True
+        fold_ok = fold_ok and BView.cur_h(fp) == 51
+    except Exception:
+        fold_ok = False
+    print(f"[bw4   ] 折叠态高(展开=H / 折叠=HEAD) {'OK' if fold_ok else '!!'}")
 
     # 截图让位探测（BUG-10）：只验可用性与不抛异常，前台态随运行环境变化故不断言值
     try:

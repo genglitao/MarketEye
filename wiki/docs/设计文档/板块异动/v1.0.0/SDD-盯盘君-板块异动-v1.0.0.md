@@ -7,11 +7,11 @@
 | 项 | 内容 |
 | --- | --- |
 | 项目名称 | 盯盘君 MarketEye |
-| 文档版本 | v1.0.0 |
+| 文档版本 | v1.0.1 |
 | 版本状态 | 未发布 |
 | 创建日期 | 2026-11-16 |
-| 更新日期 | 2026-11-16 |
-| 基于需求 | [PRD-盯盘君-板块异动-v1.0.2](../../../需求文档/板块异动/v1.0.0/PRD-盯盘君-板块异动-v1.0.0.md) |
+| 更新日期 | 2026-11-17 |
+| 基于需求 | [PRD-盯盘君-板块异动-v1.0.3](../../../需求文档/板块异动/v1.0.0/PRD-盯盘君-板块异动-v1.0.0.md) |
 | 基于设计 | 无（全新模块，无旧版 SDD） |
 | 基于原型 | [PROTO-盯盘君-板块异动-v1.0.0](../../../需求文档/板块异动/v1.0.0/PROTO-盯盘君-板块异动-v1.0.0.html)（用户已评审，具约束力） |
 
@@ -20,6 +20,7 @@
 | 版本 | 日期 | 变更人 | 变更类型 | 关联章节 | 变更内容 |
 | --- | --- | --- | --- | --- | --- |
 | v1.0.0 | 2026-11-16 | - | 新增 | — | 全新功能设计：新浪板块快照双接口采集（行业 + 概念）、本地 6 分钟滚动时序与 3 分钟窗口判定、去重与升档、事件落盘与跨日清空、无边框圆角小窗（340×420）与固定 9 行复用渲染、悬停指标说明、截图让位、右键菜单与位置记忆 |
+| v1.0.1 | 2026-11-17 | - | 增量 | §3.1、§3.5、§5、§8 | 小窗新增双击标题栏折叠（PRD v1.0.3 R-21）：`cur_h()`（折叠 = 标题栏高）作为几何唯一来源，`_layout` 主体只画到 `cur_h()`、行/滚动条/空态仍按全高坐标建（折叠时被画布裁掉）；`toggle_fold` 走换肤同款整块重建；`drop`/`reset_pos` 改用 `cur_h()`，否则双击首击的松手会把窗口撑开；`block_folded` 落盘；菜单加「折叠 / 展开」；selftest `[bw4]` |
 
 ### 1.3 技术选型
 
@@ -30,7 +31,7 @@
 | GUI | tkinter `Toplevel` + 单 `Canvas` 自绘 | 与主窗、`SView` 同构 |
 | 数据源 | 新浪板块快照双接口（行业 + 概念），GBK | 单轮 0.4 秒、无 key、无分页；东财需 12 页且并发即被断连（§3.2.1 取证） |
 | 时序存储 | 内存 `deque(maxlen=13)`，不落盘 | 6 分钟窗口 13 点，重启后重新累积即可，落盘无收益 |
-| 配置存储 | `config.json` 新增 `block_on`/`block_x`/`block_y` 三键；事件另存 `block_events.json`（当日覆盖） | 沿用 `load_json`/`save_json`；PRD M-03 约束：高频写配置会损坏配置，故事件与配置分离 |
+| 配置存储 | `config.json` 新增 `block_on`/`block_x`/`block_y`/`block_folded` 四键；事件另存 `block_events.json`（当日覆盖） | 沿用 `load_json`/`save_json`；PRD M-03 约束：高频写配置会损坏配置，故事件与配置分离 |
 | 窗口形状 | 颜色键透明 `-transparentcolor` + Canvas 自绘圆角 | 与主窗同款成熟方案；不用 `SetWindowRgn`（README 实现备注） |
 
 ### 1.4 文档目的
@@ -103,7 +104,8 @@ graph LR
 {
   "block_on": false,
   "block_x": null,
-  "block_y": null
+  "block_y": null,
+  "block_folded": false
 }
 ```
 
@@ -112,6 +114,7 @@ graph LR
 | `block_on` | 布尔 | false | 仅 true/false | 小窗显隐，与菜单勾选态恒一致 |
 | `block_x` | 整数 / null | null | 屏幕坐标 | null = 未拖动过，用默认位（主窗右侧，空间不足则左侧） |
 | `block_y` | 整数 / null | null | 屏幕坐标 | 同上 |
+| `block_folded` | 布尔 | false | 仅 true/false | 折叠态记忆（R-21）：true = 只留标题栏，重启沿用；折叠切换时与 `block_x/y` 同次落盘 |
 
 事件存档 `block_events.json`（独立文件，当日覆盖）：
 
@@ -420,6 +423,7 @@ PROTO 为准：[PROTO-盯盘君-板块异动-v1.0.0](../../../需求文档/板�
 
 | 菜单项 | 行为 | 落点 |
 | --- | --- | --- |
+| 折叠 / 展开 | `BView.toggle_fold()`：翻 `folded` → 写 `block_folded` + `block_x/y` → 按 `cur_h()` 重设 `geometry` → `delete("all")` + `_layout()` + `render()`（换肤 R-11 同款整块重建） | R-21 |
 | 清空今日记录 | `Panel.bw_clear()`：引擎清事件 + 存档写空数组 + `render()`；**不清时序、不清 `last`** | R-14 |
 | 隐藏 | `Panel.toggle_block(False)`：写 `block_on=false`、停 worker、销毁窗口、回写主窗菜单勾选态 | M-02（显隐与勾选态恒一致） |
 | 重置位置 | 从 `cfg` 删 `block_x`/`block_y` → `save_json` → 按默认位重算 `geometry`（不动 `block_on`） | R-10 |
@@ -427,6 +431,14 @@ PROTO 为准：[PROTO-盯盘君-板块异动-v1.0.0](../../../需求文档/板�
 **悬停指标说明（R-20）**
 
 热区 `self.hot["qi"] = (x1, x2, y1, y2)`，`<Motion>` 命中且 `not tip_on` 时展开（无延时，与 `SView` 的 300ms 防误触不同：问号是明确的可点元素，延时反而迟钝）。浮层内容固定 5 行（标题 + 4 项 + 注），宽度 `W − 2 × 14`，高度按 5 行 `measure` 实测；圆角矩形 `r = px(8)` 同样用拼圆角手法。
+
+**双击折叠（R-21）**
+
+- **几何唯一来源**：`cur_h()` = `HEAD if folded else H`。`_layout` 里圆角主体只画到 `cur_h()`；事件行、滚动条、空态文字仍按全高坐标建——折叠时它们落在画布高度之外被自然裁掉，展开时整块重建后原样出现。不要为折叠单独 delete 行 item：一旦折叠/展开走两条不同的绘制路径，行的高亮/「升级」标签状态就会不同步。
+- **整块重建**：`toggle_fold()` = 翻 `folded` → 写 `block_folded` 与 `block_x/y` → `geometry(W × cur_h)` → `cv.delete("all")` → `_layout()` → `render()`。与换肤（R-11）同路径，`body` 底色/圆角随新高度重画。
+- **`drop()` 必须用 `cur_h()`**：双击的第一次按下-松手会走 `drop()`，若里面写死 `self.H`，折叠状态下第一击松手就把窗口撑回全高，表现为「双击折叠不了」。`reset_pos()` 同理。
+- **双击只认标题栏**：`on_double` 里 `e.y <= HEAD` 才切换；列表区双击不响应（保持预留）。Tk 把第二次按下投递为 `<Double-Button-1>`（不再触发 `press`），因此不会与拖动手势打架。
+- **折叠态交互收敛**：滚轮（`on_wheel`）与问号悬停（`motion`）在折叠态直接 return——列表不在可视区，浮层也无处安放，响应反而制造幽灵状态。
 
 **截图让位（R-12）**
 
@@ -536,7 +548,7 @@ PROTO 为准：[PROTO-盯盘君-板块异动-v1.0.0](../../../需求文档/板�
 | PRD 功能点 | 技术产物 |
 | --- | --- |
 | F-01 异动识别 | `bw_parse`/`bw_lvl`/`bw_window`/`bw_verdict`（§3.7.2）、`BlockEngine.feed`（§3.4 R-01~R-09）、时序结构（§3.1）、常量（§3.7.1）、`is_session`（§3.7.2）、T002/T004/T012 |
-| F-02 异动小窗 | `BView`（§3.5）、`block_on/x/y`（§3.1）、`Panel.toggle_block` + 菜单项（§3.3.1/§2.4）、R-10~R-14/R-20（§3.4）、T005/T008/T010/T011 |
+| F-02 异动小窗 | `BView`（§3.5）、`block_on/x/y/folded`（§3.1）、`Panel.toggle_block` + 菜单项（§3.3.1/§2.4）、R-10~R-14/R-20/R-21（§3.4）、双击折叠 `toggle_fold`/`cur_h`（§3.5）、T005/T008/T010/T011 |
 | F-03 数据刷新与容错 | `bw_worker`（§3.2.1/§3.7.3）、poll `bw`/`bw_err`/`bw_day` 分支（§3.3.3/§3.4 R-19）、失败计数与 freeze（§3.4 R-15~R-19）、T003/T007/T009 |
 
 ## 4. 代码位置
@@ -570,7 +582,7 @@ PROTO 为准：[PROTO-盯盘君-板块异动-v1.0.0](../../../需求文档/板�
 
 | 代码位置 | 对应设计 |
 | --- | --- |
-| `config.json` | 新增 `block_on`/`block_x`/`block_y`（§3.1，T001/T008） |
+| `config.json` | 新增 `block_on`/`block_x`/`block_y`/`block_folded`（§3.1，T001/T008） |
 | `block_events.json`（程序目录，运行时生成） | 当日事件存档（§3.1，T004） |
 | `启动盯盘.bat` | 不变 |
 
