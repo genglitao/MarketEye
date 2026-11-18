@@ -1735,6 +1735,19 @@ def pad_to(s, width):
     return s + " " * max(0, width - disp_width(s))
 
 
+def reorder_move(seq, i, k):
+    """把 seq[i] 搬到第 k 位（0 基），其余按原相对顺序顺次挪位（R-04）。
+
+    自选清单的位置就是序号，所以「改序号」= 一次搬家：搬完立即重排为
+    1~N 连续升序，不留空号也不重号。越界 / 原位原样返回新列表。
+    """
+    out = list(seq)
+    if not (0 <= i < len(out)) or not (0 <= k < len(out)) or i == k:
+        return out
+    out.insert(k, out.pop(i))
+    return out
+
+
 # ---------------------------------------------------------------- 代码搜索
 MKT_CN = {"sh": "沪", "sz": "深", "bj": "北", "hk": "港"}
 
@@ -9473,6 +9486,10 @@ class WatchlistDialog:
         self.tab = "标的"
         self._tab_items = {"标的": [], "列": []}   # 页签 -> 画布 item id
         self._cur_tab = "标的"                      # 新建控件归属的页签
+        # 列表字体与「序号区」宽度：双击落在序号区 = 改序号，落在右侧 = 改别名
+        self.f_lb = tkfont.Font(family=self.f_cn, size=9)
+        self._no_px = int(self.f_lb.measure("00.  ")) + self.px(8)
+        self._flash_after = None
 
         self.dlg = tk.Toplevel(app.root)
         self.dlg.withdraw()
@@ -9545,7 +9562,7 @@ class WatchlistDialog:
         self.cv.create_text(self.px(16), self.px(20), anchor="w", text="管理自选",
                             fill=self.C_TEXT, font=(self.f_cn, 10, "bold"))
         self.cv.create_text(W - self.px(16), self.px(20), anchor="e",
-                            text="选中后可用 ↑ ↓ 调整顺序",
+                            text="双击行首序号可直接改序",
                             fill=self.C_SUB, font=(self.f_cn, 8))
         cid = self.cv.create_text(W - self.px(150), self.px(20), text="✕",
                                   fill=self.C_SUB, font=(self.f_cn, 11))
@@ -9609,13 +9626,14 @@ class WatchlistDialog:
             self.px(16), self.px(348), anchor="w", text="自选列表",
             fill=self.C_SUB, font=(self.f_cn, 8))
         self._tab_items["标的"].append(self.tip_sel)
-        self.lb_sel = self._listbox(16, 360, 386, 160, on_double=self.rename,
+        self.lb_sel = self._listbox(16, 360, 386, 160, on_double=self.on_sel_double,
                                     on_delete=lambda e: self.remove_pick())
 
         # 底部按钮（标的页专属）
         self._button(16, 544, 34, 32, "↑", lambda: self.move(-1))
         self._button(56, 544, 34, 32, "↓", lambda: self.move(1))
         self._button(96, 544, 62, 32, "删除", self.remove_pick, "danger")
+        self._button(166, 544, 96, 32, "改序号", self.edit_no, "ghost")
         self._button(272, 544, 68, 32, "取消", self.close)
         self._button(348, 544, 66, 32, "保存", self.save, "primary")
 
@@ -9816,12 +9834,19 @@ class WatchlistDialog:
 
     # ---------- 自选操作 ----------
     def refresh_sel(self):
+        """重排自选清单：行首序号即位置，恒为 1~N 连续升序（R-04）。"""
         self.lb_sel.delete(0, "end")
+        nw = max(2, len(str(max(1, len(self.items)))))     # ≥100 项时序号 3 位
         for i, it in enumerate(self.items):
             alias = it.get("alias") or it.get("code", "")
-            self.lb_sel.insert("end", f"{i + 1:>2}.  {pad_to(alias, 15)}{it.get('code', '')}")
-        self.cv.itemconfig(self.tip_sel,
-                           text=f"自选列表 · {len(self.items)} 项 · 双击改别名 · Delete 删除")
+            self.lb_sel.insert(
+                "end", f"{i + 1:>{nw}}.  {pad_to(alias, 15)}{it.get('code', '')}")
+        # 序号区宽度按当前位数实测（双击命中判定用，R-01）
+        self._no_px = int(self.f_lb.measure("0" * nw + ".  ")) + self.px(8)
+        self.cv.itemconfig(
+            self.tip_sel, fill=self.C_SUB,
+            text=(f"自选列表 · {len(self.items)} 项 · 双击序号改序 · "
+                  f"双击名称改别名 · Delete 删除"))
 
     def add_pick(self, _=None):
         sel = self.lb_res.curselection()
@@ -9850,6 +9875,66 @@ class WatchlistDialog:
             j = min(i, len(self.items) - 1)
             self.lb_sel.selection_set(j)
 
+    def _place(self, i, k):
+        """把第 i 行搬到第 k 行（0 基）：其余按原相对顺序顺次挪位。"""
+        self.items = reorder_move(self.items, i, k)
+        self.refresh_sel()
+        self.lb_sel.selection_clear(0, "end")
+        self.lb_sel.selection_set(k)
+        self.lb_sel.see(k)
+
+    def _flash(self, msg):
+        """校验失败提示：临时占用列表标题行，1.4 秒后恢复（不动搜索结果）。"""
+        self.cv.itemconfig(self.tip_sel, text=msg, fill=self.C_DANGER)
+        if self._flash_after:
+            try:
+                self.dlg.after_cancel(self._flash_after)
+            except Exception:
+                pass
+        self._flash_after = self.dlg.after(1400, self.refresh_sel)
+
+    def edit_no(self):
+        """改序号（R-01/R-02）：输入目标位次，一次搬到该位置。
+
+        ↑↓ 适合挪一位，长距离（末位→首位）要点 N 下；改序号一次到位。
+        序号是「第几位」而非优先级数值——填完立即重编为 1~N 连续升序，
+        所以越界不自动钳到边界（钳制会让用户以为已经搬到位，R-03）。
+        """
+        sel = self.lb_sel.curselection()
+        if not sel:
+            self._flash("先选中一行再改序号")
+            return
+        i, n = sel[0], len(self.items)
+        if n < 2:
+            return
+
+        def done(val):
+            try:
+                k = int(str(val).strip())
+            except Exception:
+                self._flash("序号请填数字")
+                return
+            if not 1 <= k <= n:
+                self._flash(f"序号需在 1 ~ {n} 之间")
+                return
+            if k - 1 != i:
+                self._place(i, k - 1)
+            else:
+                self.lb_sel.selection_clear(0, "end")
+                self.lb_sel.selection_set(i)
+                self.lb_sel.see(i)
+
+        InputBox(self, f"改序号（1 ~ {n}）", str(i + 1), done)
+
+    def on_sel_double(self, e):
+        """双击行：序号区改序号，名称区改别名（R-01）。"""
+        if not self.lb_sel.curselection():
+            return
+        if e.x <= self._no_px:
+            self.edit_no()
+        else:
+            self.rename()
+
     def move(self, d):
         sel = self.lb_sel.curselection()
         if not sel:
@@ -9858,11 +9943,7 @@ class WatchlistDialog:
         j = i + d
         if not 0 <= j < len(self.items):
             return
-        self.items[i], self.items[j] = self.items[j], self.items[i]
-        self.refresh_sel()
-        self.lb_sel.selection_clear(0, "end")
-        self.lb_sel.selection_set(j)
-        self.lb_sel.see(j)
+        self._place(i, j)
 
     def rename(self, _=None):
         sel = self.lb_sel.curselection()
@@ -10192,6 +10273,21 @@ def selftest():
     if not (p_ok and m_ok):
         print(f"  heads={[(m[1], m[2]) for m in p_heads]} lines={p_lines} "
               f"clamp={_pc} mapped={mapped}")
+
+    # ---- 自选排序：改序号 = 一次搬家（R-04）----
+    base = list(range(41))
+    o1 = reorder_move(base, 40, 0)        # 末位 → 首位
+    o2 = reorder_move(base, 0, 40)        # 首位 → 末位
+    o3 = reorder_move(base, 2, 19)        # 中间对中间
+    o4 = reorder_move(base, 5, 5)         # 原位
+    o5 = reorder_move(base, 0, 41)        # 越界
+    o_ok = (o1[:2] == [40, 0] and o1[-1] == 39 and len(o1) == 41
+            and o2[0] == 1 and o2[-2:] == [40, 0]
+            and o3[19] == 2 and o3[2] == 3 and len(o3) == 41
+            and o4 == base and o5 == base
+            and sorted(o1) == base)       # 不丢项、不重项
+    print(f"[order ] 改序号搬位(末→首/首→末/中间/原位/越界) "
+          f"{'OK' if o_ok else '!! ' + str((o1[:3], o2[-3:], o3[2:5]))}")
 
     # ---- 盘面速览：纯函数自检（无网络，R10-T009）----
     sv_rows = ["0.99", "0.00", "", None, "-1.20"] * 200   # 1000 条，非法按 0 计
