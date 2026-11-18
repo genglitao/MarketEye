@@ -201,11 +201,12 @@ BW_REQ_GAP = 0.03         # 两请求串行间隔（秒，防限流）
 BW_TIMEOUT = 10           # 单请求超时（秒）
 BW_MIN_HY = 40            # 行业条数下限（实测 49）
 BW_MIN_GN = 120           # 概念条数下限（实测 172，会浮动，只做下限不写死）
-BW_KEEP = 360             # 时序保留（秒，6 分钟）
-BW_KEEP_N = 13            # 时序最大点数（360/30 + 1）
+BW_KEEP = 480             # 时序保留（秒，8 分钟；前窗基点最远在 390 秒前，
+BW_KEEP_N = 17            #   360 只够边界、抖动下必丢 → 倍数恒算不出，见 bw5）
 BW_WIN = 180              # 判定窗口（秒，3 分钟）
 BW_SPAN_MIN = 165         # 窗口跨度下限（180 − 15，容差半个采集周期）
 BW_SPAN_MAX = 195         # 窗口跨度上限（180 + 15，超限即视为丢轮）
+BW_TOL = 15               # 取点容差（秒，= BW_WIN − SPAN_MIN；bw_cut 两侧生效）
 BW_TH_PCT = 0.8           # 涨速阈值（%）
 BW_TH_VOL = 1.3           # 放量倍数阈值
 BW_TH_AMT = 5e7           # 放量绝对下限（元，5000 万）
@@ -230,7 +231,7 @@ BW_TIP_ROWS = (
     ("档位", f"{BW_TH_PCT:g} / {BW_LVL_MID:g} / {BW_LVL_STRONG:g}% → 弱 / 中 / 强"),
     ("去重", f"同向 {BW_DEDUP // 60} 分钟一条，升档记「升级」"),
 )
-BW_TIP_FOOT = "时序不足 6 分钟时放量豁免，该条标「未校验」。"
+BW_TIP_FOOT = "开盘后约 7 分钟内拿不到前窗基准，放量豁免并标「未校验」。"
 
 # ---- K 线窗口（SDD §3.7.1；第二轮 2026-10-30：10 档 / 6 均线 / MACD / 分时）----
 KLINE_DEF_W, KLINE_DEF_H = 880, 640   # 默认窗口尺寸（逻辑像素）
@@ -727,22 +728,33 @@ def bw_lvl(pct):
     return 2
 
 
+def bw_cut(series, cut):
+    """时序 → 距 `cut` 最近且 |ts−cut| ≤ BW_TOL 的点 → (ts, pct, amt) / None。
+
+    R-02 的 ±15 秒容差要同时向两侧生效：采样带抖动时，基准点可能落在
+    cut 之后零点几秒——只认「≤ cut」会把它跳过、退到 30 秒前的点（跨度
+    210 秒超出 SPAN_MAX，整轮判定作废）。就近取点后跨度恒落在
+    [SPAN_MIN, SPAN_MAX]，_judge 里的跨度校验成为兜底而非唯一防线。
+    """
+    best = None
+    for it in series:
+        d = it[0] - cut
+        if d > BW_TOL:
+            break
+        if best is None or abs(d) < abs(best[0] - cut):
+            best = it
+    return best
+
+
 def bw_window(series, now, win=BW_WIN):
     """时序 → (pct_then, amt_then, span)（R-02）。
 
-    在 time 递增的 deque 里定位 `ts ≤ now − win` 的**最近**点（deque 按时间
-    递增，最后一个满足者即最近点）。无满足点返回 None。
+    定位「now − win」容差内最近的样本点（见 bw_cut）。无满足点返回 None。
     """
-    best = None
-    cut = now - win
-    for it in series:
-        if it[0] <= cut:
-            best = it
-        else:
-            break
-    if best is None:
+    it = bw_cut(series, now - win)
+    if it is None:
         return None
-    return best[1], best[2], now - best[0]
+    return it[1], it[2], now - it[0]
 
 
 def bw_verdict(diff, pct_now, inc1, inc0):
@@ -4983,8 +4995,9 @@ class BlockEngine:
     请求、不读配置（存档路径走模块常量）。221 个板块 × 13 点判定全是纯计算，
     selftest 可直测——塞进 UI 类就无法测了。
 
-    内存：`series` 保存每板块 6 分钟时序（deque maxlen=13，30 秒一点），
-    `last` 保存去重基准，`events` 倒序（0 = 最新）。
+    内存：`series` 保存每板块 8 分钟时序（deque maxlen=17，30 秒一点；判放量
+    要再往前 3 分钟的前窗基点，6 分钟保留在采样抖动下正好被淘汰——2026-11-18
+    缺陷修复），`last` 保存去重基准，`events` 倒序（0 = 最新）。
     """
 
     def __init__(self):
@@ -4998,7 +5011,7 @@ class BlockEngine:
     def feed(self, snap, now):
         """推进一轮快照 → 本轮新增事件列表（可能为空）。
 
-        R-01 时序：每板块 append 并淘汰 360 秒外的旧点；同一轮重复（同 ts）
+        R-01 时序：每板块 append 并淘汰 BW_KEEP（8 分钟）外的旧点；同一轮重复（同 ts）
         跳过；成交额回退（数据抖动/接口回退）本轮跳过该板块且不追加时序
         （§3.6），否则会拿回退值算出一个负增量的假异动。
         R-09 排序：同轮多块触发时按涨速绝对值**升序**逐条 insert(0)——倒插后
@@ -5040,16 +5053,9 @@ class BlockEngine:
             return None            # R-02/D10：丢轮时宁可少报，不把 3.5 分钟当 3 分钟
         ts_then = now - span
         diff = s["pct"] - pct_then
-        # 前窗对称校验（R-03）：跨度同样要在 ±15 秒内，否则 inc0 偏大、比值偏低
-        cut = None
-        for it in ser:
-            if it[0] <= ts_then - BW_WIN:
-                cut = it
-            else:
-                break
-        inc0 = None
-        if cut is not None and BW_SPAN_MIN <= ts_then - cut[0] <= BW_SPAN_MAX:
-            inc0 = amt_then - cut[2]
+        # 前窗对称校验（R-03）：基点同样容差内就近取，跨度由 bw_cut 保证
+        c_it = bw_cut(ser, ts_then - BW_WIN)
+        inc0 = amt_then - c_it[2] if c_it is not None else None
         inc1 = s["amt"] - amt_then
         hit, lvl, mult, unverified = bw_verdict(diff, s["pct"], inc1, inc0)
         if not hit:
@@ -5997,6 +6003,8 @@ class BView:
         self.scroll = 0             # 视口顶部对应的事件下标（0 = 最新）
         self.tip_on = False
         self._dragging = False
+        self._sb_drag = False       # 正在拖滚动条滑块（拖的是列表，不是窗口）
+        self._sb_off = 0            # 按下滑块时指针相对滑块顶的偏移
         self._yielded = False
         self._dx = self._dy = 0
         self._phase = None          # 上次落笔的 (状态, 条数)，变化才重排
@@ -6287,21 +6295,28 @@ class BView:
         c.coords(self.mark, self.W - self.px(14) - self.f_num.measure(cnt)
                  - self.px(9), self.HEAD / 2)
 
-    def _scrollbar(self, n):
-        """滑块高度按 可视/总数 比例，最小 20px；不足一屏时整条隐藏。"""
-        c, t = self.cv, self.theme
+    def _sb_geom(self, n):
+        """滚动条几何：(top, bot, x, thumb_h, thumb_top)；不足一屏 → None。"""
         if n <= self.VIS:
-            c.itemconfigure(self.sb_track, state="hidden")
-            c.itemconfigure(self.sb_thumb, state="hidden")
-            return
-        c.itemconfigure(self.sb_track, state="normal", fill=t["line"])
+            return None
         top = self.HEAD + self.px(6)
         bot = self.HEAD + self.VIS * self.ROW - self.px(6)
         span = bot - top
         h = max(self.px(20), span * self.VIS / float(n))
         off = (span - h) * (self.scroll / float(max(1, n - self.VIS)))
-        x = self.W - self.px(6)
-        c.coords(self.sb_thumb, x, top + off, x, top + off + h)
+        return top, bot, self.W - self.px(6), h, top + off
+
+    def _scrollbar(self, n):
+        """滑块高度按 可视/总数 比例，最小 20px；不足一屏时整条隐藏。"""
+        c, t = self.cv, self.theme
+        g = self._sb_geom(n)
+        if g is None:
+            c.itemconfigure(self.sb_track, state="hidden")
+            c.itemconfigure(self.sb_thumb, state="hidden")
+            return
+        top, bot, x, h, ty = g
+        c.itemconfigure(self.sb_track, state="normal", fill=t["line"])
+        c.coords(self.sb_thumb, x, ty, x, ty + h)
         c.itemconfigure(self.sb_thumb, state="normal", fill=t["bar"])
 
     def _empty(self, n):
@@ -6397,7 +6412,10 @@ class BView:
                 self._yielded = False
                 self.win.deiconify()
                 x, y = self.win.winfo_x(), self.win.winfo_y()
-                self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+                # 高度必须走 cur_h()：折叠态写死 self.H 会把窗口撑成全高，
+                # 而主体圆角只画到标题栏（折叠布局），列表区整块透明 →
+                # 文字直接压在品红键色上，抗锯齿边缘混出品红「阴影」（2026-11-18）
+                self.win.geometry(f"{self.W}x{self.cur_h()}+{x}+{y}")
                 self.sync_top()
                 self.win.lift()
         except Exception:
@@ -6462,12 +6480,48 @@ class BView:
                 pass
 
     # ---------- 滚动 / 拖动 / 右键 ----------
+    # ---------- 滚动条拖动（2026-11-18：滑块原本只画不响应） ----------
+    def _sb_press(self, e):
+        """按在滚动条上：滑块→开始拖；轨道→按平台惯例翻一页。消费返回 True。"""
+        if self.folded:
+            return False
+        n = len(self.app.bw_engine.events)
+        g = self._sb_geom(n)
+        if g is None or e.x < self.W - self.px(13):
+            return False                 # 不在滚动条竖条区 → 照常拖窗口
+        top, _bot, _x, h, ty = g
+        self._tip_hide()
+        if ty - self.px(4) <= e.y <= ty + h + self.px(4):
+            self._sb_drag = True         # 滑块（含 4px 容差）：进入拖动
+            self._sb_off = e.y - ty
+        elif e.y < ty:                   # 滑块上方轨道：向前翻一页
+            self.scroll = max(0, self.scroll - self.VIS)
+            self.render()
+        else:                            # 下方轨道：向后翻一页
+            self.scroll = min(n - self.VIS, self.scroll + self.VIS)
+            self.render()
+        return True
+
+    def _sb_move(self, y):
+        """拖动中：指针位置 → 视口下标（几何与 _scrollbar 同源）。"""
+        n = len(self.app.bw_engine.events)
+        g = self._sb_geom(n)
+        if g is None:
+            return
+        top, _bot, _x, h, _ty = g
+        span = (self.HEAD + self.VIS * self.ROW - self.px(6)) - top - h
+        if span <= 0:
+            return
+        k = (y - top - self._sb_off) / span
+        self.scroll = max(0, min(round(k * (n - self.VIS)), n - self.VIS))
+        self.render()
+
     def on_wheel(self, e):
-        """滚轮上滚看更早的事件（scroll 加大即向历史翻）。"""
+        """滚轮下滚向列表深处翻（scroll 加大 = 视口下移 = 内容上移），与常规列表一致。"""
         if self.folded:
             return                      # 折叠态无列表，滚轮无意义（R-21）
         n = len(self.app.bw_engine.events)
-        step = 3 if e.delta > 0 else -3
+        step = -3 if e.delta > 0 else 3
         self.scroll = max(0, min(self.scroll + step, max(0, n - self.VIS)))
         self._tip_hide()
         self.render()
@@ -6505,15 +6559,23 @@ class BView:
 
     def press(self, e):
         self._tip_hide()
+        if self._sb_press(e):
+            return
         self._dragging = True
         self._dx, self._dy = e.x, e.y
 
     def drag(self, e):
+        if self._sb_drag:
+            self._sb_move(e.y)           # 拖滑块：滚列表，窗口不动
+            return
         x = self.win.winfo_x() + e.x - self._dx
         y = self.win.winfo_y() + e.y - self._dy
         self.win.geometry(f"+{x}+{y}")
 
     def drop(self, e):
+        if self._sb_drag:
+            self._sb_drag = False        # 滑块拖完：不动窗口几何、不落盘
+            return
         self._dragging = False
         x = max(0, min(self.win.winfo_x(),
                        self.win.winfo_screenwidth() - self.W))
@@ -10515,6 +10577,101 @@ def selftest():
     except Exception:
         fold_ok = False
     print(f"[bw4   ] 折叠态高(展开=H / 折叠=HEAD) {'OK' if fold_ok else '!!'}")
+
+    # 滚轮方向（v1.0.3 缺陷修复）：下滚 delta<0 应让 scroll 增大（视口向列表深处、
+    # 内容上移，与常规列表一致）；修复前符号写反——上滚向历史翻、下滚回最新
+    try:
+        class _WheelProbe:
+            folded = False
+            scroll = 1
+            VIS = 9
+
+            class _App:
+                class bw_engine:
+                    events = list(range(30))   # 30 条，VIS 9，可滚
+
+            app = _App()
+
+            @staticmethod
+            def _tip_hide():
+                pass
+
+            @staticmethod
+            def render():
+                pass
+
+        class _Ev:                       # 极简事件桩（项目未引 types，不用 SimpleNamespace）
+            def __init__(self, d):
+                self.delta = d
+
+        wp = _WheelProbe()
+        BView.on_wheel(wp, _Ev(-120))               # 下滚
+        wheel_dn = (wp.scroll == 4)                 # 1 + 3 = 4
+        BView.on_wheel(wp, _Ev(120))                # 上滚
+        wheel_ok = wheel_dn and (wp.scroll == 1)    # 4 - 3 = 1
+    except Exception as _ex:
+        wheel_ok = False
+        print(f"[bw6   ] 探针异常 {_ex!r}")
+    print(f"[bw6   ] 滚轮方向(下滚+3向深处 / 上滚-3回最新) {'OK' if wheel_ok else '!!'}")
+
+    # 让位恢复保持折叠高（2026-11-18 缺陷修复）：折叠态若写死 self.H 恢复，
+    # 窗口被撑成全高而 body 只画到标题栏 → 列表区整块透明，文字压在品红
+    # 键色上，抗锯齿边缘混出品红「阴影」（截图实拍确认）。恢复一律走 cur_h()
+    try:
+        class _BWApp:
+            pass
+
+        a7 = _BWApp()
+        root7 = tk.Tk()                    # 上文的 root 已销毁，这里单独起一个
+        root7.withdraw()
+        a7.root = root7
+        a7.s = get_scale()
+        a7.theme = THEMES["light"]
+        a7.f_cn = pick_family(root7, "Microsoft YaHei UI", "Microsoft YaHei", "SimHei")
+        a7.f_num = pick_family(root7, "Consolas", "Cascadia Mono", "Courier New")
+        a7.cfg = {"block_folded": True, "block_x": 10, "block_y": 10, "topmost": False}
+        a7.bw_engine = BlockEngine()
+        a7.bw_phase = lambda: "open"
+        a7._dbg = lambda s: None
+        # 铁律：凡构造真窗口的用例，配置路径先指到临时文件，绝不写用户的 config.json
+        _cfg_old = globals()["CONFIG_FILE"]
+        globals()["CONFIG_FILE"] = os.path.join(BASE, "config.selftest.json")
+        bv7 = BView(a7)
+        bv7.win.withdraw()
+        _ff_old = globals()["foreign_fullscreen"]
+        globals()["foreign_fullscreen"] = lambda: False
+        bv7._yielded = True                    # 模拟「让位过、现在恢复」
+        bv7._yield_tick()
+        bv7.win.update()
+        yield_ok = (bv7.win.winfo_height() == bv7.HEAD)
+        # 对照：显式设成全高应读到 H，证明上面的断言不是「测不出差异」
+        bv7.win.geometry(f"{bv7.W}x{bv7.H}+10+10")
+        bv7.win.update()
+        yield_ok = yield_ok and (bv7.win.winfo_height() == bv7.H)
+        globals()["foreign_fullscreen"] = _ff_old
+        globals()["CONFIG_FILE"] = _cfg_old
+        bv7.win.destroy()
+        root7.destroy()
+    except Exception as _ex:
+        yield_ok = False
+        print(f"[bw7   ] 探针异常 {_ex!r}")
+    print(f"[bw7   ] 让位恢复保持折叠高(不撑成全高) {'OK' if yield_ok else '!!'}")
+
+    # 时序保留 + 容差取点（2026-11-18 缺陷修复）：30 秒采样带确定性抖动时，
+    # 窗口与前窗基点都必须可得、放量倍数要算得出来——修复前 BW_KEEP=360
+    # 卡边界 + 取点只认「≤ cut」，验证轮数恒为 0（15 条全「未校验」）
+    eng6 = BlockEngine()
+    jit_ok = 0
+    for i in range(30):
+        now = 2.0e9 + i * 30 + 0.2 + (i * 7 % 5) * 0.1   # 0.2~0.6 秒确定性抖动
+        snap = {"c": {"name": "x", "members": 20,
+                      "pct": 0.15 * i,                  # 3 分钟差 0.9%，恒过涨速
+                      "amt": 1e8 * (i + 1) * (i + 1),   # 加速放量，倍数 > 1.3
+                      "lead": "", "lead_pct": 0.0}}
+        eng6.last.clear()        # 绕过去重，逐轮看判定结果
+        jit_ok += sum(1 for e in eng6.feed(snap, now) if not e["unverified"])
+    print(f"[bw5   ] 时序保留+容差取点(抖动下放量倍数可校验>=10) "
+          f"{'OK' if jit_ok >= 10 else '!! ' + str(jit_ok)}")
 
     # 截图让位探测（BUG-10）：只验可用性与不抛异常，前台态随运行环境变化故不断言值
     try:
