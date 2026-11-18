@@ -251,11 +251,11 @@
   },
   "page_size": 20,
   "sview_on": true,
-  "sview_x": 1946,
-  "sview_y": 1446,
-  "folded": false,
+  "sview_x": 1948,
+  "sview_y": 1481,
+  "folded": true,
   "block_on": true,
-  "block_x": 1968,
-  "block_y": 1084,
+  "block_x": 2050,
+  "block_y": 765,
   "block_folded": true
 }
