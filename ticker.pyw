@@ -56,6 +56,8 @@ THEMES = {
         "text": "#EAEFF8", "sub": "#7E8BA1", "name": "#C3CCDC",
         "up": "#FF4D4F", "down": "#12B76A", "flat": "#95A1B4",
         "bar": "#9AA8C0",
+        # 重点标记名称强调色（琥珀）：只用于标记行的名称与 ★，不动涨跌配色
+        "accent": "#F5A623",
         # 菜单 hover 高亮（BUG-13）：必须跟主题走，硬编码深蓝在浅色主题下突兀
         "sel": "#3B4A63", "sel_fg": "#FFFFFF",
     },
@@ -64,6 +66,7 @@ THEMES = {
         "text": "#1A2233", "sub": "#8592A6", "name": "#3C4658",
         "up": "#E5484D", "down": "#0E9F5E", "flat": "#7A8699",
         "bar": "#9AA8C0",
+        "accent": "#B7791F",
         "sel": "#D6E2F7", "sel_fg": "#1A2233",
     },
 }
@@ -467,7 +470,8 @@ def page_meta(groups):
     """分组配置 → 分页元素序列 [(kind, payload, owner)]（自选分页 T003）。
 
     kind='h'：组头，payload=分组名，owner=该组首只股票的全局行号；
-    kind='r'：股票行，payload=(code, alias)，owner=自身全局行号。
+    kind='r'：股票行，payload=(code, alias, mark)，owner=自身全局行号
+    （mark=重点标记，重点标记 T002）。
     组头只记录、不占行号位（SDD 裁决 D2），因此恒渲染在其首行正上方、
     永不孤立在页尾。空分组 / 无有效代码的分组不产生任何元素。
     只接收 groups，不依赖 Panel 实例，便于 --selftest 直接调用。
@@ -482,7 +486,7 @@ def page_meta(groups):
             code = normalize(item.get("code", ""))
             if not code:
                 continue
-            rows.append(("r", (code, item.get("alias")), gidx))
+            rows.append(("r", (code, item.get("alias"), bool(item.get("mark"))), gidx))
             gidx += 1
         if rows:
             meta.append(("h", g.get("name", ""), rows[0][2]))
@@ -847,6 +851,15 @@ def trunc(s, limit=13):
         out += ch
         w += cw
     return out
+
+
+def name_cell_text(mark, s):
+    """重点标记行名称单元格文本：★ 前缀拼在 trunc 之后（重点标记 T003）。
+
+    先截断再拼前缀，避免截断把 ★ 之后的名称多吞一个字；
+    未标记行原样返回。build 与 paint 两处名称渲染共用本函数。
+    """
+    return ("★ " if mark else "") + trunc(s)
 
 
 # ---------------------------------------------------------------- 行情抓取
@@ -1815,7 +1828,7 @@ class Panel:
         # 折叠态（用户口径 2026-11-11）：启动默认折叠成标题栏，不默认展开；
         # 读 config["folded"] 记住上次状态，缺键按折叠处理（老配置也升级为折叠启动）
         self.folded = bool(self.cfg.get("folded", True))
-        self.rows = []      # [(code, alias, {列键: item_id})]
+        self.rows = []      # [(code, alias, mark, {列键: item_id})]，mark=重点标记
         self.hit = []       # [(y0, y1, code)]
         self.dlg = None     # 自选管理面板
         # K线窗口（必须早于 _build_menu：菜单回调引用 self.kline_menu_idx，
@@ -3357,22 +3370,22 @@ class Panel:
                                     fill=t["line"])
                 y += self.grp_h
             else:
-                code, alias = payload
+                code, alias, mark = payload
                 cy = y + self.row_h / 2
                 ids = {}
                 for k in self.vis_cols:
                     x0, x1 = self.col_x[k]
                     if k == "name":
                         ids[k] = self.cc.create_text(x0, cy, anchor="w",
-                                                     text=trunc(alias or code),
-                                                     fill=t["name"],
+                                                     text=name_cell_text(mark, alias or code),
+                                                     fill=t["accent"] if mark else t["name"],
                                                      font=(self.f_cn, 9))
                     else:
                         ids[k] = self.cc.create_text(x1, cy, anchor="e",
                                                      text=PLACEHOLDER_NONE,
                                                      fill=t["flat"],
                                                      font=(self.f_num, 9, "bold"))
-                self.rows.append((code, alias, ids))
+                self.rows.append((code, alias, mark, ids))
                 self.hit.append((y, y + self.row_h, code))
                 y += self.row_h
 
@@ -3634,7 +3647,7 @@ class Panel:
             self.cv.itemconfig(self.dot, fill=t["flat"])
 
         c = self.cc if self.cc is not None else self.cv
-        for code, alias, ids in self.rows:
+        for code, alias, mark, ids in self.rows:
             d = self.data.get(code)
 
             # ① 正常行：数值列跟随该行 pct 变色，行业列恒 sub
@@ -3643,8 +3656,10 @@ class Panel:
                 color = t["up"] if pct > 0 else (t["down"] if pct < 0 else t["flat"])
                 if "name" in ids:
                     if not alias:               # 没设别名时用接口返回的名称
-                        c.itemconfig(ids["name"], text=trunc(d["name"]))
-                    c.itemconfig(ids["name"], fill=t["name"])
+                        c.itemconfig(ids["name"],
+                                     text=name_cell_text(mark, d["name"]))
+                    c.itemconfig(ids["name"],
+                                 fill=t["accent"] if mark else t["name"])
                 if "price" in ids:
                     c.itemconfig(ids["price"], text=fmt_price(d["price"]), fill=color)
                 if "pct" in ids:
@@ -3664,7 +3679,8 @@ class Panel:
 
             # ② 单只缺数据（停牌/未开盘）与 ③ 整体无数据：名称不动，其余五列 --
             if "name" in ids:
-                c.itemconfig(ids["name"], fill=t["name"])
+                c.itemconfig(ids["name"],
+                             fill=t["accent"] if mark else t["name"])
             for k in ("price", "pct", "vr", "turnover"):
                 if k in ids:
                     c.itemconfig(ids[k], text=PLACEHOLDER_NONE, fill=t["flat"])
@@ -3697,7 +3713,7 @@ class Panel:
         if self.cc is None:
             return
         t = self.theme
-        for code, _alias, ids in self.rows:
+        for code, _alias, _mark, ids in self.rows:
             if "industry" not in ids:
                 continue
             if self.data.get(code):
@@ -4120,7 +4136,7 @@ class Panel:
             if COL_DEF[key][1]:
                 self.cv.coords(tag, self.col_x[key][1], y)
         self.cv.coords("h_line", 0, self.cc_top, self.CW, self.cc_top)
-        for _code, _alias, ids in self.rows:
+        for _code, _alias, _mark, ids in self.rows:
             for key, iid in ids.items():
                 x = self.col_x[key][0] if key == "name" else self.col_x[key][1]
                 self.cc.coords(iid, x, self.cc.coords(iid)[1])
@@ -9691,13 +9707,16 @@ class WatchlistDialog:
         self.lb_sel = self._listbox(16, 360, 386, 160, on_double=self.on_sel_double,
                                     on_delete=lambda e: self.remove_pick())
 
-        # 底部按钮（标的页专属）
-        self._button(16, 544, 34, 32, "↑", lambda: self.move(-1))
-        self._button(56, 544, 34, 32, "↓", lambda: self.move(1))
-        self._button(96, 544, 62, 32, "删除", self.remove_pick, "danger")
-        self._button(166, 544, 96, 32, "改序号", self.edit_no, "ghost")
-        self._button(272, 544, 68, 32, "取消", self.close)
-        self._button(348, 544, 66, 32, "保存", self.save, "primary")
+        # 底部按钮（标的页专属；重点标记 T005 重排为 7 钮，右缘仍对齐 414）
+        self._button(16, 544, 30, 32, "↑", lambda: self.move(-1))
+        self._button(50, 544, 30, 32, "↓", lambda: self.move(1))
+        self._button(84, 544, 54, 32, "删除", self.remove_pick, "danger")
+        self._button(142, 544, 78, 32, "改序号", self.edit_no, "ghost")
+        self.btn_mark = self._button(224, 544, 78, 32, "重点标记",
+                                     self.toggle_mark, "ghost")
+        self._button(306, 544, 46, 32, "取消", self.close)
+        self._button(356, 544, 58, 32, "保存", self.save, "primary")
+        self.lb_sel.bind("<<ListboxSelect>>", lambda e: self._sync_mark_btn())
 
         # 列页签内容
         self._cur_tab = "列"
@@ -9901,14 +9920,39 @@ class WatchlistDialog:
         nw = max(2, len(str(max(1, len(self.items)))))     # ≥100 项时序号 3 位
         for i, it in enumerate(self.items):
             alias = it.get("alias") or it.get("code", "")
+            star = "★ " if it.get("mark") else "  "        # 未标记占位对齐（R-04）
             self.lb_sel.insert(
-                "end", f"{i + 1:>{nw}}.  {pad_to(alias, 15)}{it.get('code', '')}")
+                "end", f"{i + 1:>{nw}}.  {star}{pad_to(alias, 15)}{it.get('code', '')}")
         # 序号区宽度按当前位数实测（双击命中判定用，R-01）
         self._no_px = int(self.f_lb.measure("0" * nw + ".  ")) + self.px(8)
         self.cv.itemconfig(
             self.tip_sel, fill=self.C_SUB,
             text=(f"自选列表 · {len(self.items)} 项 · 双击序号改序 · "
                   f"双击名称改别名 · Delete 删除"))
+        self._sync_mark_btn()
+
+    def toggle_mark(self):
+        """重点标记切换（R-01）：选中行 mark 取反，未选中行红字提示（R-02）。"""
+        sel = self.lb_sel.curselection()
+        if not sel:
+            self._flash("先选中一行再标记")
+            return
+        i = sel[0]
+        it = self.items[i]
+        it["mark"] = not it.get("mark")
+        self.refresh_sel()
+        self.lb_sel.selection_clear(0, "end")
+        self.lb_sel.selection_set(i)
+        self.lb_sel.see(i)
+        self._sync_mark_btn()
+
+    def _sync_mark_btn(self):
+        """按钮文字随选中行状态实时切换（R-01）：已标记→取消重点。"""
+        sel = self.lb_sel.curselection()
+        marked = bool(sel) and bool(self.items[sel[0]].get("mark"))
+        btn = getattr(self, "btn_mark", None)   # refresh_sel 可能先于按钮创建
+        if btn is not None:
+            btn.config(text="取消重点" if marked else "重点标记")
 
     def add_pick(self, _=None):
         sel = self.lb_res.curselection()
@@ -10308,7 +10352,7 @@ def selftest():
     pm_ok = (len(p_rows) == 32                       # 7 + 1 + 24（空 code 跳过）
              and len(p_heads) == 2                   # 空组无组头
              and p_heads[0][2] == 0 and p_heads[1][2] == 7   # owner = 首行全局行号
-             and p_rows[8][1] == ("sz100000", None))
+             and p_rows[8][1] == ("sz100000", None, False))   # 载荷含 mark 位（重点标记 T002）
     ptotal = max(1, -(-len(p_rows) // 10))
     p_lines, p_ok = [], pm_ok
     for p in range(ptotal):
@@ -10350,6 +10394,29 @@ def selftest():
             and sorted(o1) == base)       # 不丢项、不重项
     print(f"[order ] 改序号搬位(末→首/首→末/中间/原位/越界) "
           f"{'OK' if o_ok else '!! ' + str((o1[:3], o2[-3:], o3[2:5]))}")
+
+    # ---- 重点标记：纯函数自检（无网络，重点标记 T006）----
+    # name_cell_text：★ 前缀拼在 trunc 之后；未标记原样
+    mk1 = name_cell_text(True, "长江电力")            # 短名：★ + 全名
+    mk2 = name_cell_text(False, "长江电力")            # 未标记：原样
+    mk3 = name_cell_text(True, "这是一个超过十三个字宽的长名称测试用例")
+    mk4 = name_cell_text(False, "这是一个超过十三个字宽的长名称测试用例")
+    m_ok = (mk1 == "★ 长江电力" and mk2 == "长江电力"
+            and mk3.startswith("★ ") and mk3.endswith("…")
+            and len(mk3) <= len("★ ") + 13            # 截断口径未被前缀挤宽
+            and mk4 == trunc("这是一个超过十三个字宽的长名称测试用例"))
+    # page_meta：mark 跟行走；旧配置缺 mark 键视为未标记（R-05）
+    pm_cfg = [{"name": "自选", "items": [
+        {"code": "sh600000", "alias": "A", "mark": True},
+        {"code": "sh600001", "alias": "B"},                # 旧配置形态
+        {"code": "sh600002", "alias": "C", "mark": 1},     # 非布尔真值
+    ]}]
+    pm = page_meta(pm_cfg)
+    pm_rows = [p for k, p, _ in pm if k == "r"]
+    m_ok = m_ok and (pm_rows[0][2] is True and pm_rows[1][2] is False
+                     and pm_rows[2][2] is True)
+    print(f"[mark  ] 重点标记(name_cell_text/page_meta 缺键兼容) "
+          f"{'OK' if m_ok else '!! ' + str((mk1, mk2, pm_rows))}")
 
     # ---- 盘面速览：纯函数自检（无网络，R10-T009）----
     sv_rows = ["0.99", "0.00", "", None, "-1.20"] * 200   # 1000 条，非法按 0 计
