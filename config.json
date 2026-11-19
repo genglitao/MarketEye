@@ -46,15 +46,18 @@
       "items": [
         {
           "code": "sz300274",
-          "alias": "阳光电源"
+          "alias": "阳光电源",
+          "mark": true
         },
         {
           "code": "sh601006",
-          "alias": "大秦铁路"
+          "alias": "大秦铁路",
+          "mark": true
         },
         {
           "code": "sz002157",
-          "alias": "正邦科技"
+          "alias": "正邦科技",
+          "mark": true
         },
         {
           "code": "sz000027",
@@ -62,11 +65,23 @@
         },
         {
           "code": "sz399809",
-          "alias": "保险主题"
+          "alias": "保险主题",
+          "mark": true
         },
         {
           "code": "sz399437",
-          "alias": "证券龙头"
+          "alias": "证券龙头",
+          "mark": true
+        },
+        {
+          "code": "sh000941",
+          "alias": "新能源",
+          "mark": true
+        },
+        {
+          "code": "sz159865",
+          "alias": "养殖ETF国泰",
+          "mark": true
         },
         {
           "code": "sz159633",
@@ -81,12 +96,13 @@
           "alias": "中证2000ETF南方"
         },
         {
-          "code": "sz159915",
-          "alias": "创业板ETF易方达"
+          "code": "sh513330",
+          "alias": "恒生互联网ETF华夏",
+          "mark": true
         },
         {
-          "code": "sh513330",
-          "alias": "恒生互联网ETF华夏"
+          "code": "sz159915",
+          "alias": "创业板ETF易方达"
         },
         {
           "code": "sz159142",
@@ -95,10 +111,6 @@
         {
           "code": "sz159708",
           "alias": "红利ETF西部利得"
-        },
-        {
-          "code": "sz159865",
-          "alias": "养殖ETF国泰"
         },
         {
           "code": "sh515120",
@@ -154,7 +166,8 @@
         },
         {
           "code": "sh688717",
-          "alias": "艾罗能源"
+          "alias": "艾罗能源",
+          "mark": true
         },
         {
           "code": "sh600438",
@@ -170,11 +183,13 @@
         },
         {
           "code": "sz300750",
-          "alias": "宁德时代"
+          "alias": "宁德时代",
+          "mark": true
         },
         {
           "code": "sz159207",
-          "alias": "高股息ETF广发"
+          "alias": "高股息ETF广发",
+          "mark": true
         },
         {
           "code": "sh600216",
@@ -186,7 +201,8 @@
         },
         {
           "code": "sz000995",
-          "alias": "皇台酒业"
+          "alias": "皇台酒业",
+          "mark": true
         },
         {
           "code": "sh600809",
@@ -207,6 +223,11 @@
         {
           "code": "sz001220",
           "alias": "世盟股份"
+        },
+        {
+          "code": "sh512800",
+          "alias": "银行ETF华宝",
+          "mark": true
         }
       ]
     }
@@ -229,8 +250,8 @@
   "show_amount": true,
   "drawings": {},
   "kline": {
-    "w": 880,
-    "h": 640,
+    "w": 1707,
+    "h": 996,
     "period": "day",
     "custom": {
       "n": 45,
@@ -246,16 +267,16 @@
       "ma120": true,
       "ma250": true
     },
-    "x": 620,
-    "y": 213
+    "x": -11,
+    "y": -11
   },
   "page_size": 20,
   "sview_on": true,
   "sview_x": 1948,
   "sview_y": 1481,
   "folded": true,
-  "block_on": true,
+  "block_on": false,
   "block_x": 2050,
-  "block_y": 765,
-  "block_folded": true
+  "block_y": 799,
+  "block_folded": false
 }
